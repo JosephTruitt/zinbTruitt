@@ -1,0 +1,10 @@
+.Rproj.user
+.Rhistory
+.RData
+.Ruserdata
+*.Rproj
+.DS_Store
+vignettes/*.html
+vignettes/*_files/
+*_cache/
+.quarto/

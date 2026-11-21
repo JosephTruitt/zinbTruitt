@@ -1,0 +1,12 @@
+^.*\.Rproj$
+^\.Rproj\.user$
+^CLAUDE\.md$
+^README\.Rmd$
+^_pkgdown\.yml$
+^docs$
+^pkgdown$
+^report$
+^inst/benchmark/results$
+^\.github$
+^\.quarto$
+^LICENSE\.md$
