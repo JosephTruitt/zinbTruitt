@@ -1,0 +1,5 @@
+"dataset","model","ours_sec","reference_sec","iterations"
+"bioChemists","NB",0.012,0.027,4
+"bioChemists","ZINB",0.535,0.0670000000000002,121
+"NMES1988","NB",0.0479999999999992,0.0899999999999999,3
+"NMES1988","ZINB",1.071,0.307,52
