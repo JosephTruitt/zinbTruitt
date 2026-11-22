@@ -10,3 +10,5 @@
 ^\.github$
 ^\.quarto$
 ^LICENSE\.md$
+\.gitkeep$
+^vignettes/articles$

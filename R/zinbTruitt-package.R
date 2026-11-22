@@ -4,5 +4,5 @@
 #' binomial regression ([zinbreg()]) without general-purpose optimizers.
 #'
 #' @keywords internal
-#' @importFrom stats coef
+#' @importFrom stats coef vcov logLik nobs fitted residuals predict
 "_PACKAGE"
