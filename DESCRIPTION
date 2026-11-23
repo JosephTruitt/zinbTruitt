@@ -3,7 +3,7 @@ Type: Package
 Title: Negative Binomial and Zero-Inflated Negative Binomial Regression via IRLS and EM
 Version: 0.0.0.9000
 Authors@R: 
-    person("Joseph", "Truitt", email = "you@example.com", role = c("aut", "cre"))
+    person("Joseph", "Truitt", email = "truittj@miamioh.edu", role = c("aut", "cre"))
 Description: Fits negative binomial (NB) regression by iteratively reweighted
     least squares (IRLS) alternated with Newton-Raphson for the dispersion
     parameter, and zero-inflated negative binomial (ZINB) regression by an EM
