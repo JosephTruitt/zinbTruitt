@@ -1,0 +1,26 @@
+url: https://JosephTruitt.github.io/zinbTruitt/
+
+template:
+  bootstrap: 5
+
+reference:
+  - title: Model fitting
+    desc: Negative binomial and zero-inflated negative binomial regression.
+    contents:
+      - nbreg
+      - zinbreg
+  - title: Control settings
+    contents:
+      - nbreg_control
+      - zinbreg_control
+  - title: S3 methods
+    desc: print, summary, coef, vcov, logLik, fitted, residuals, nobs and predict.
+    contents:
+      - nbreg-methods
+      - zinbreg-methods
+
+articles:
+  - title: Project report
+    navbar: ~
+    contents:
+      - report
