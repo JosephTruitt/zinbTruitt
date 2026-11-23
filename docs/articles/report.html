@@ -1,0 +1,1253 @@
+<html lang="en"><head>
+<script src="report_files/libs/quarto-html/popper.min.js"></script>
+<script src="report_files/libs/quarto-html/tippy.umd.min.js"></script>
+<link href="report_files/libs/quarto-html/tippy.css" rel="stylesheet">
+<link href="report_files/libs/quarto-html/light-border.css" rel="stylesheet"><title>Negative Binomial and Zero-Inflated Negative Binomial Regression in R: IRLS, Newton–Raphson, and EM Without a General-Purpose Optimizer</title>
+  <!-- Needed for testing but not used in final output -->
+  <style>
+    /* Default styles provided by pandoc.
+    ** See https://pandoc.org/MANUAL.html#variables-for-html for config info.
+    */
+    code{white-space: pre-wrap;}
+    span.smallcaps{font-variant: small-caps;}
+    div.columns{display: flex; gap: min(4vw, 1.5em);}
+    div.column{flex: auto; overflow-x: auto;}
+    div.hanging-indent{margin-left: 1.5em; text-indent: -1.5em;}
+    ul.task-list{list-style: none;}
+    ul.task-list li input[type="checkbox"] {
+      width: 0.8em;
+      margin: 0 0.8em 0.2em -1em; /* quarto-specific, see https://github.com/quarto-dev/quarto-cli/issues/4556 */ 
+      vertical-align: middle;
+    }
+    /* CSS for syntax highlighting */
+    html { -webkit-text-size-adjust: 100%; }
+    pre > code.sourceCode { white-space: pre; position: relative; }
+    pre > code.sourceCode > span { display: inline-block; line-height: 1.25; }
+    pre > code.sourceCode > span:empty { height: 1.2em; }
+    .sourceCode { overflow: visible; }
+    code.sourceCode > span { color: inherit; text-decoration: inherit; }
+    div.sourceCode { margin: 1em 0; }
+    pre.sourceCode { margin: 0; }
+    @media screen {
+    div.sourceCode { overflow: auto; }
+    }
+    @media print {
+    pre > code.sourceCode { white-space: pre-wrap; }
+    pre > code.sourceCode > span { text-indent: -5em; padding-left: 5em; }
+    }
+    pre.numberSource code
+      { counter-reset: source-line 0; }
+    pre.numberSource code > span
+      { position: relative; left: -4em; counter-increment: source-line; }
+    pre.numberSource code > span > a:first-child::before
+      { content: counter(source-line);
+        position: relative; left: -1em; text-align: right; vertical-align: baseline;
+        border: none; display: inline-block;
+        -webkit-touch-callout: none; -webkit-user-select: none;
+        -khtml-user-select: none; -moz-user-select: none;
+        -ms-user-select: none; user-select: none;
+        padding: 0 4px; width: 4em;
+      }
+    pre.numberSource { margin-left: 3em;  padding-left: 4px; }
+    div.sourceCode
+      {   }
+    @media screen {
+    pre > code.sourceCode > span > a:first-child::before { text-decoration: underline; }
+    }
+  </style>
+</head>
+<body>
+
+<div class="includes-before">
+</div>
+
+<div class="meta">
+  <h1>Negative Binomial and Zero-Inflated Negative Binomial Regression in R: IRLS, Newton–Raphson, and EM Without a General-Purpose Optimizer</h1>
+
+
+  <p class="author">Joseph Truitt</p>
+
+  <p class="date">November 2026</p>
+
+
+</div>
+
+<main>
+<section id="introduction" class="level1" data-number="1">
+<h1 data-number="1"><span class="header-section-number">1</span> Introduction</h1>
+<p>Count outcomes such as the number of articles an author publishes or the number of physician visits a patient makes are routinely analyzed with Poisson regression. The Poisson model forces the variance to equal the mean, an assumption that real count data usually violate in two ways. First, the data are often <em>overdispersed</em>: the variance exceeds the mean because of unobserved heterogeneity. The negative binomial (NB) model handles this by adding a dispersion parameter <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mi>θ</mi><annotation encoding="application/x-tex">\theta</annotation></semantics></math>. Second, the data often contain <em>more zeros</em> than even an NB model predicts, because some units are never at risk of a positive count. The zero-inflated negative binomial (ZINB) model handles this by mixing the NB distribution with a point mass at zero (Lambert, 1992; Cameron and Trivedi, 2013).</p>
+<p>The standard R implementations, <code>MASS::glm.nb()</code> and <code>pscl::zeroinfl()</code>, are reliable but treat the estimation as a black box. The goal of this project was to build an R package, <code>zinbTruitt</code>, that fits both models from first principles and reproduces the reference implementations. The estimation uses only closed-form building blocks: iteratively reweighted least squares (IRLS) for regression coefficients, Newton–Raphson for the dispersion parameter, and the EM algorithm (Dempster, Laird and Rubin, 1977) for the zero-inflation mixture. No call to <code>optim()</code> or any other general-purpose optimizer is made.</p>
+<p>The report describes the algorithms (Section 2), the package (Section 3), agreement with the reference functions on two data sets (Section 4), a simulation study (Section 5), an analysis of physician office visits in the 1987–88 National Medical Expenditure Survey (Section 6), and limitations (Section 7). All numbers, tables, and figures are produced by code in this document that calls the installed package.</p>
+</section>
+<section id="methods" class="level1" data-number="2">
+<h1 data-number="2"><span class="header-section-number">2</span> Methods</h1>
+<section id="negative-binomial-regression" class="level2" data-number="2.1">
+<h2 data-number="2.1"><span class="header-section-number">2.1</span> Negative binomial regression</h2>
+<p>Let <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><msub><mi>Y</mi><mi>i</mi></msub><annotation encoding="application/x-tex">Y_i</annotation></semantics></math> be a count with covariate vector <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><msub><mi>x</mi><mi>i</mi></msub><annotation encoding="application/x-tex">x_i</annotation></semantics></math> and optional offset <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><msub><mi>o</mi><mi>i</mi></msub><annotation encoding="application/x-tex">o_i</annotation></semantics></math>. The NB2 model has probability function <math display="block" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mi>P</mi><mo stretchy="false" form="prefix">(</mo><msub><mi>Y</mi><mi>i</mi></msub><mo>=</mo><mi>y</mi><mo stretchy="false" form="postfix">)</mo><mo>=</mo><mfrac><mrow><mi mathvariant="normal">Γ</mi><mo stretchy="false" form="prefix">(</mo><mi>y</mi><mo>+</mo><mi>θ</mi><mo stretchy="false" form="postfix">)</mo></mrow><mrow><mi mathvariant="normal">Γ</mi><mo stretchy="false" form="prefix">(</mo><mi>θ</mi><mo stretchy="false" form="postfix">)</mo><mspace width="0.167em"></mspace><mi>y</mi><mi>!</mi></mrow></mfrac><msup><mrow><mo stretchy="true" form="prefix">(</mo><mfrac><mi>θ</mi><mrow><mi>θ</mi><mo>+</mo><msub><mi>μ</mi><mi>i</mi></msub></mrow></mfrac><mo stretchy="true" form="postfix">)</mo></mrow><mi>θ</mi></msup><msup><mrow><mo stretchy="true" form="prefix">(</mo><mfrac><msub><mi>μ</mi><mi>i</mi></msub><mrow><mi>θ</mi><mo>+</mo><msub><mi>μ</mi><mi>i</mi></msub></mrow></mfrac><mo stretchy="true" form="postfix">)</mo></mrow><mi>y</mi></msup><mo>,</mo><mspace width="2.0em"></mspace><mrow><mi mathvariant="normal">log</mi><mo>⁡</mo></mrow><msub><mi>μ</mi><mi>i</mi></msub><mo>=</mo><msubsup><mi>x</mi><mi>i</mi><mi>⊤</mi></msubsup><mi>β</mi><mo>+</mo><msub><mi>o</mi><mi>i</mi></msub><mo>,</mo></mrow><annotation encoding="application/x-tex">
+P(Y_i = y) = \frac{\Gamma(y + \theta)}{\Gamma(\theta)\,y!}\left(\frac{\theta}{\theta + \mu_i}\right)^{\theta}\left(\frac{\mu_i}{\theta + \mu_i}\right)^{y}, \qquad \log \mu_i = x_i^\top\beta + o_i,
+</annotation></semantics></math> so that <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mi>E</mi><mo stretchy="false" form="prefix">(</mo><msub><mi>Y</mi><mi>i</mi></msub><mo stretchy="false" form="postfix">)</mo><mo>=</mo><msub><mi>μ</mi><mi>i</mi></msub></mrow><annotation encoding="application/x-tex">E(Y_i) = \mu_i</annotation></semantics></math> and <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mrow><mi mathvariant="normal">V</mi><mi mathvariant="normal">a</mi><mi mathvariant="normal">r</mi></mrow><mo stretchy="false" form="prefix">(</mo><msub><mi>Y</mi><mi>i</mi></msub><mo stretchy="false" form="postfix">)</mo><mo>=</mo><msub><mi>μ</mi><mi>i</mi></msub><mo>+</mo><msubsup><mi>μ</mi><mi>i</mi><mn>2</mn></msubsup><mi>/</mi><mi>θ</mi></mrow><annotation encoding="application/x-tex">\mathrm{Var}(Y_i) = \mu_i + \mu_i^2/\theta</annotation></semantics></math> with <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mi>θ</mi><mo>&gt;</mo><mn>0</mn></mrow><annotation encoding="application/x-tex">\theta &gt; 0</annotation></semantics></math>. As <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mi>θ</mi><mo>→</mo><mi>∞</mi></mrow><annotation encoding="application/x-tex">\theta \to \infty</annotation></semantics></math> the model reduces to Poisson. With prior weights <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><msub><mi>a</mi><mi>i</mi></msub><annotation encoding="application/x-tex">a_i</annotation></semantics></math> (all equal to one for an ordinary fit) the log-likelihood is <math display="block" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mi>ℓ</mi><mo stretchy="false" form="prefix">(</mo><mi>β</mi><mo>,</mo><mi>θ</mi><mo stretchy="false" form="postfix">)</mo><mo>=</mo><munder><mo>∑</mo><mi>i</mi></munder><msub><mi>a</mi><mi>i</mi></msub><mo minsize="180%" maxsize="180%" stretchy="true" form="prefix">[</mo><mrow><mi mathvariant="normal">log</mi><mo>⁡</mo></mrow><mi mathvariant="normal">Γ</mi><mo stretchy="false" form="prefix">(</mo><msub><mi>y</mi><mi>i</mi></msub><mo>+</mo><mi>θ</mi><mo stretchy="false" form="postfix">)</mo><mo>−</mo><mrow><mi mathvariant="normal">log</mi><mo>⁡</mo></mrow><mi mathvariant="normal">Γ</mi><mo stretchy="false" form="prefix">(</mo><mi>θ</mi><mo stretchy="false" form="postfix">)</mo><mo>−</mo><mrow><mi mathvariant="normal">log</mi><mo>⁡</mo></mrow><msub><mi>y</mi><mi>i</mi></msub><mi>!</mi><mo>+</mo><mi>θ</mi><mrow><mi mathvariant="normal">log</mi><mo>⁡</mo></mrow><mi>θ</mi><mo>+</mo><msub><mi>y</mi><mi>i</mi></msub><mrow><mi mathvariant="normal">log</mi><mo>⁡</mo></mrow><msub><mi>μ</mi><mi>i</mi></msub><mo>−</mo><mo stretchy="false" form="prefix">(</mo><mi>θ</mi><mo>+</mo><msub><mi>y</mi><mi>i</mi></msub><mo stretchy="false" form="postfix">)</mo><mrow><mi mathvariant="normal">log</mi><mo>⁡</mo></mrow><mo stretchy="false" form="prefix">(</mo><mi>θ</mi><mo>+</mo><msub><mi>μ</mi><mi>i</mi></msub><mo stretchy="false" form="postfix">)</mo><mo minsize="180%" maxsize="180%" stretchy="true" form="postfix">]</mo><mi>.</mi></mrow><annotation encoding="application/x-tex">
+\ell(\beta, \theta) = \sum_i a_i\Big[\log\Gamma(y_i + \theta) - \log\Gamma(\theta) - \log y_i! + \theta\log\theta + y_i\log\mu_i - (\theta + y_i)\log(\theta + \mu_i)\Big].
+</annotation></semantics></math> This is the parameterization of <code>MASS::glm.nb()</code>.</p>
+<p><strong>IRLS for <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mi>β</mi><annotation encoding="application/x-tex">\beta</annotation></semantics></math> (with <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mi>θ</mi><annotation encoding="application/x-tex">\theta</annotation></semantics></math> fixed).</strong> The log link gives <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mi>∂</mi><msub><mi>μ</mi><mi>i</mi></msub><mi>/</mi><mi>∂</mi><msub><mi>η</mi><mi>i</mi></msub><mo>=</mo><msub><mi>μ</mi><mi>i</mi></msub></mrow><annotation encoding="application/x-tex">\partial\mu_i/\partial\eta_i = \mu_i</annotation></semantics></math> and the variance function is <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mi>V</mi><mo stretchy="false" form="prefix">(</mo><msub><mi>μ</mi><mi>i</mi></msub><mo stretchy="false" form="postfix">)</mo><mo>=</mo><msub><mi>μ</mi><mi>i</mi></msub><mo>+</mo><msubsup><mi>μ</mi><mi>i</mi><mn>2</mn></msubsup><mi>/</mi><mi>θ</mi></mrow><annotation encoding="application/x-tex">V(\mu_i) = \mu_i + \mu_i^2/\theta</annotation></semantics></math>. Fisher scoring is then equivalent to repeated weighted least squares with working weights and working response <math display="block" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><msub><mi>w</mi><mi>i</mi></msub><mo>=</mo><msub><mi>a</mi><mi>i</mi></msub><mspace width="0.167em"></mspace><mfrac><mrow><mo stretchy="false" form="prefix">(</mo><mi>∂</mi><msub><mi>μ</mi><mi>i</mi></msub><mi>/</mi><mi>∂</mi><msub><mi>η</mi><mi>i</mi></msub><msup><mo stretchy="false" form="postfix">)</mo><mn>2</mn></msup></mrow><mrow><mi>V</mi><mo stretchy="false" form="prefix">(</mo><msub><mi>μ</mi><mi>i</mi></msub><mo stretchy="false" form="postfix">)</mo></mrow></mfrac><mo>=</mo><msub><mi>a</mi><mi>i</mi></msub><mspace width="0.167em"></mspace><mfrac><mrow><mi>θ</mi><msub><mi>μ</mi><mi>i</mi></msub></mrow><mrow><mi>θ</mi><mo>+</mo><msub><mi>μ</mi><mi>i</mi></msub></mrow></mfrac><mo>,</mo><mspace width="2.0em"></mspace><msub><mi>u</mi><mi>i</mi></msub><mo>=</mo><mo stretchy="false" form="prefix">(</mo><msub><mi>η</mi><mi>i</mi></msub><mo>−</mo><msub><mi>o</mi><mi>i</mi></msub><mo stretchy="false" form="postfix">)</mo><mo>+</mo><mfrac><mrow><msub><mi>y</mi><mi>i</mi></msub><mo>−</mo><msub><mi>μ</mi><mi>i</mi></msub></mrow><msub><mi>μ</mi><mi>i</mi></msub></mfrac><mo>,</mo></mrow><annotation encoding="application/x-tex">
+w_i = a_i\,\frac{(\partial\mu_i/\partial\eta_i)^2}{V(\mu_i)} = a_i\,\frac{\theta\mu_i}{\theta + \mu_i}, \qquad u_i = (\eta_i - o_i) + \frac{y_i - \mu_i}{\mu_i},
+</annotation></semantics></math> <math display="block" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><msup><mi>β</mi><mrow><mo stretchy="false" form="prefix">(</mo><mi>t</mi><mo>+</mo><mn>1</mn><mo stretchy="false" form="postfix">)</mo></mrow></msup><mo>=</mo><mo stretchy="false" form="prefix">(</mo><msup><mi>X</mi><mi>⊤</mi></msup><mi>W</mi><mi>X</mi><msup><mo stretchy="false" form="postfix">)</mo><mrow><mi>−</mi><mn>1</mn></mrow></msup><msup><mi>X</mi><mi>⊤</mi></msup><mi>W</mi><mi>u</mi><mo>,</mo><mspace width="2.0em"></mspace><mi>W</mi><mo>=</mo><mrow><mi mathvariant="normal">d</mi><mi mathvariant="normal">i</mi><mi mathvariant="normal">a</mi><mi mathvariant="normal">g</mi></mrow><mo stretchy="false" form="prefix">(</mo><msub><mi>w</mi><mn>1</mn></msub><mo>,</mo><mi>…</mi><mo>,</mo><msub><mi>w</mi><mi>n</mi></msub><mo stretchy="false" form="postfix">)</mo><mi>.</mi></mrow><annotation encoding="application/x-tex">
+\beta^{(t+1)} = (X^\top W X)^{-1}X^\top W u, \qquad W = \mathrm{diag}(w_1, \dots, w_n).
+</annotation></semantics></math> The working response <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><msub><mi>u</mi><mi>i</mi></msub><annotation encoding="application/x-tex">u_i</annotation></semantics></math> is a first-order Taylor expansion of the link function at the observed <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><msub><mi>y</mi><mi>i</mi></msub><annotation encoding="application/x-tex">y_i</annotation></semantics></math>, and its approximate variance is <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mn>1</mn><mi>/</mi><msub><mi>w</mi><mi>i</mi></msub><mo>=</mo><mn>1</mn><mi>/</mi><msub><mi>μ</mi><mi>i</mi></msub><mo>+</mo><mn>1</mn><mi>/</mi><mi>θ</mi></mrow><annotation encoding="application/x-tex">1/w_i = 1/\mu_i + 1/\theta</annotation></semantics></math>, the sum of a Poisson component and an overdispersion component. The weighted least squares step is solved by a QR decomposition. Because <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><msub><mi>u</mi><mi>i</mi></msub><annotation encoding="application/x-tex">u_i</annotation></semantics></math> and <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><msub><mi>w</mi><mi>i</mi></msub><annotation encoding="application/x-tex">w_i</annotation></semantics></math> depend on <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><msub><mi>μ</mi><mi>i</mi></msub><annotation encoding="application/x-tex">\mu_i</annotation></semantics></math>, and hence on <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mi>β</mi><annotation encoding="application/x-tex">\beta</annotation></semantics></math>, the step is repeated until the log-likelihood stops changing.</p>
+<p><strong>Newton–Raphson for <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mi>θ</mi><annotation encoding="application/x-tex">\theta</annotation></semantics></math> (with <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mi>β</mi><annotation encoding="application/x-tex">\beta</annotation></semantics></math> fixed).</strong> The score and second derivative of <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mi>ℓ</mi><annotation encoding="application/x-tex">\ell</annotation></semantics></math> in <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mi>θ</mi><annotation encoding="application/x-tex">\theta</annotation></semantics></math> are <math display="block" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mi>U</mi><mo stretchy="false" form="prefix">(</mo><mi>θ</mi><mo stretchy="false" form="postfix">)</mo><mo>=</mo><munder><mo>∑</mo><mi>i</mi></munder><msub><mi>a</mi><mi>i</mi></msub><mo minsize="180%" maxsize="180%" stretchy="true" form="prefix">[</mo><mi>ψ</mi><mo stretchy="false" form="prefix">(</mo><msub><mi>y</mi><mi>i</mi></msub><mo>+</mo><mi>θ</mi><mo stretchy="false" form="postfix">)</mo><mo>−</mo><mi>ψ</mi><mo stretchy="false" form="prefix">(</mo><mi>θ</mi><mo stretchy="false" form="postfix">)</mo><mo>+</mo><mrow><mi mathvariant="normal">log</mi><mo>⁡</mo></mrow><mi>θ</mi><mo>+</mo><mn>1</mn><mo>−</mo><mrow><mi mathvariant="normal">log</mi><mo>⁡</mo></mrow><mo stretchy="false" form="prefix">(</mo><mi>θ</mi><mo>+</mo><msub><mi>μ</mi><mi>i</mi></msub><mo stretchy="false" form="postfix">)</mo><mo>−</mo><mstyle displaystyle="false"><mfrac><mrow><msub><mi>y</mi><mi>i</mi></msub><mo>+</mo><mi>θ</mi></mrow><mrow><mi>θ</mi><mo>+</mo><msub><mi>μ</mi><mi>i</mi></msub></mrow></mfrac></mstyle><mo minsize="180%" maxsize="180%" stretchy="true" form="postfix">]</mo><mo>,</mo></mrow><annotation encoding="application/x-tex">
+U(\theta) = \sum_i a_i\Big[\psi(y_i + \theta) - \psi(\theta) + \log\theta + 1 - \log(\theta + \mu_i) - \tfrac{y_i + \theta}{\theta + \mu_i}\Big],
+</annotation></semantics></math> <math display="block" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mi>H</mi><mo stretchy="false" form="prefix">(</mo><mi>θ</mi><mo stretchy="false" form="postfix">)</mo><mo>=</mo><munder><mo>∑</mo><mi>i</mi></munder><msub><mi>a</mi><mi>i</mi></msub><mo minsize="180%" maxsize="180%" stretchy="true" form="prefix">[</mo><msup><mi>ψ</mi><mo>′</mo></msup><mo stretchy="false" form="prefix">(</mo><msub><mi>y</mi><mi>i</mi></msub><mo>+</mo><mi>θ</mi><mo stretchy="false" form="postfix">)</mo><mo>−</mo><msup><mi>ψ</mi><mo>′</mo></msup><mo stretchy="false" form="prefix">(</mo><mi>θ</mi><mo stretchy="false" form="postfix">)</mo><mo>+</mo><mstyle displaystyle="false"><mfrac><mn>1</mn><mi>θ</mi></mfrac></mstyle><mo>−</mo><mstyle displaystyle="false"><mfrac><mn>2</mn><mrow><mi>θ</mi><mo>+</mo><msub><mi>μ</mi><mi>i</mi></msub></mrow></mfrac></mstyle><mo>+</mo><mstyle displaystyle="false"><mfrac><mrow><msub><mi>y</mi><mi>i</mi></msub><mo>+</mo><mi>θ</mi></mrow><mrow><mo stretchy="false" form="prefix">(</mo><mi>θ</mi><mo>+</mo><msub><mi>μ</mi><mi>i</mi></msub><msup><mo stretchy="false" form="postfix">)</mo><mn>2</mn></msup></mrow></mfrac></mstyle><mo minsize="180%" maxsize="180%" stretchy="true" form="postfix">]</mo><mo>,</mo></mrow><annotation encoding="application/x-tex">
+H(\theta) = \sum_i a_i\Big[\psi'(y_i + \theta) - \psi'(\theta) + \tfrac{1}{\theta} - \tfrac{2}{\theta + \mu_i} + \tfrac{y_i + \theta}{(\theta + \mu_i)^2}\Big],
+</annotation></semantics></math> where <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mi>ψ</mi><annotation encoding="application/x-tex">\psi</annotation></semantics></math> and <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><msup><mi>ψ</mi><mo>′</mo></msup><annotation encoding="application/x-tex">\psi'</annotation></semantics></math> are the digamma and trigamma functions. To keep <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mi>θ</mi><annotation encoding="application/x-tex">\theta</annotation></semantics></math> positive the update is made on <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mi>ϕ</mi><mo>=</mo><mrow><mi mathvariant="normal">log</mi><mo>⁡</mo></mrow><mi>θ</mi></mrow><annotation encoding="application/x-tex">\phi = \log\theta</annotation></semantics></math> using <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><msub><mi>U</mi><mi>ϕ</mi></msub><mo>=</mo><mi>θ</mi><mi>U</mi></mrow><annotation encoding="application/x-tex">U_\phi = \theta U</annotation></semantics></math> and <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><msub><mi>H</mi><mi>ϕ</mi></msub><mo>=</mo><msup><mi>θ</mi><mn>2</mn></msup><mi>H</mi><mo>+</mo><mi>θ</mi><mi>U</mi></mrow><annotation encoding="application/x-tex">H_\phi = \theta^2 H + \theta U</annotation></semantics></math>: <math display="block" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mi>ϕ</mi><mo>←</mo><mi>ϕ</mi><mo>−</mo><msub><mi>U</mi><mi>ϕ</mi></msub><mi>/</mi><msub><mi>H</mi><mi>ϕ</mi></msub><mi>.</mi></mrow><annotation encoding="application/x-tex">
+\phi \leftarrow \phi - U_\phi / H_\phi .
+</annotation></semantics></math> Steps are bounded and halved if the log-likelihood does not increase, and <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mi>θ</mi><annotation encoding="application/x-tex">\theta</annotation></semantics></math> is capped at a large value (default <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><msup><mn>10</mn><mn>6</mn></msup><annotation encoding="application/x-tex">10^6</annotation></semantics></math>), at which a warning reports the Poisson limit.</p>
+<p><strong>Outer loop.</strong> The fit starts from a Poisson IRLS fit and a moment estimate of <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mi>θ</mi><annotation encoding="application/x-tex">\theta</annotation></semantics></math> based on <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mrow><mi mathvariant="normal">V</mi><mi mathvariant="normal">a</mi><mi mathvariant="normal">r</mi></mrow><mo stretchy="false" form="prefix">(</mo><mi>Y</mi><mo stretchy="false" form="postfix">)</mo><mo>=</mo><mi>μ</mi><mo>+</mo><msup><mi>μ</mi><mn>2</mn></msup><mi>/</mi><mi>θ</mi></mrow><annotation encoding="application/x-tex">\mathrm{Var}(Y) = \mu + \mu^2/\theta</annotation></semantics></math>. The IRLS and Newton–Raphson updates are then alternated until the relative change in the log-likelihood falls below <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><msup><mn>10</mn><mrow><mi>−</mi><mn>13</mn></mrow></msup><annotation encoding="application/x-tex">10^{-13}</annotation></semantics></math>.</p>
+</section>
+<section id="zero-inflated-negative-binomial-regression" class="level2" data-number="2.2">
+<h2 data-number="2.2"><span class="header-section-number">2.2</span> Zero-inflated negative binomial regression</h2>
+<p>In the ZINB model an observation is a structural zero with probability <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><msub><mi>π</mi><mi>i</mi></msub><annotation encoding="application/x-tex">\pi_i</annotation></semantics></math> and otherwise follows NB(<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><msub><mi>μ</mi><mi>i</mi></msub><mo>,</mo><mi>θ</mi></mrow><annotation encoding="application/x-tex">\mu_i, \theta</annotation></semantics></math>), where <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mrow><mi mathvariant="normal">log</mi><mo>⁡</mo></mrow><msub><mi>μ</mi><mi>i</mi></msub><mo>=</mo><msubsup><mi>x</mi><mi>i</mi><mi>⊤</mi></msubsup><mi>β</mi><mo>+</mo><msub><mi>o</mi><mi>i</mi></msub></mrow><annotation encoding="application/x-tex">\log\mu_i = x_i^\top\beta + o_i</annotation></semantics></math> and <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mrow><mi mathvariant="normal">l</mi><mi mathvariant="normal">o</mi><mi mathvariant="normal">g</mi><mi mathvariant="normal">i</mi><mi mathvariant="normal">t</mi></mrow><mspace width="0.167em"></mspace><msub><mi>π</mi><mi>i</mi></msub><mo>=</mo><msubsup><mi>z</mi><mi>i</mi><mi>⊤</mi></msubsup><mi>γ</mi></mrow><annotation encoding="application/x-tex">\mathrm{logit}\,\pi_i = z_i^\top\gamma</annotation></semantics></math>. The covariates <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><msub><mi>z</mi><mi>i</mi></msub><annotation encoding="application/x-tex">z_i</annotation></semantics></math> may differ from <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><msub><mi>x</mi><mi>i</mi></msub><annotation encoding="application/x-tex">x_i</annotation></semantics></math>. Writing <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><msub><mi>f</mi><mrow><mi>N</mi><mi>B</mi></mrow></msub><mo stretchy="false" form="prefix">(</mo><mn>0</mn><mo>;</mo><mi>μ</mi><mo>,</mo><mi>θ</mi><mo stretchy="false" form="postfix">)</mo><mo>=</mo><mo stretchy="false" form="prefix">{</mo><mi>θ</mi><mi>/</mi><mo stretchy="false" form="prefix">(</mo><mi>θ</mi><mo>+</mo><mi>μ</mi><mo stretchy="false" form="postfix">)</mo><msup><mo stretchy="false" form="postfix">}</mo><mi>θ</mi></msup></mrow><annotation encoding="application/x-tex">f_{NB}(0;\mu,\theta) = \{\theta/(\theta + \mu)\}^\theta</annotation></semantics></math>, <math display="block" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mi>P</mi><mo stretchy="false" form="prefix">(</mo><msub><mi>Y</mi><mi>i</mi></msub><mo>=</mo><mn>0</mn><mo stretchy="false" form="postfix">)</mo><mo>=</mo><msub><mi>π</mi><mi>i</mi></msub><mo>+</mo><mo stretchy="false" form="prefix">(</mo><mn>1</mn><mo>−</mo><msub><mi>π</mi><mi>i</mi></msub><mo stretchy="false" form="postfix">)</mo><msub><mi>f</mi><mrow><mi>N</mi><mi>B</mi></mrow></msub><mo stretchy="false" form="prefix">(</mo><mn>0</mn><mo>;</mo><msub><mi>μ</mi><mi>i</mi></msub><mo>,</mo><mi>θ</mi><mo stretchy="false" form="postfix">)</mo><mo>,</mo><mspace width="2.0em"></mspace><mi>P</mi><mo stretchy="false" form="prefix">(</mo><msub><mi>Y</mi><mi>i</mi></msub><mo>=</mo><mi>y</mi><mo stretchy="false" form="postfix">)</mo><mo>=</mo><mo stretchy="false" form="prefix">(</mo><mn>1</mn><mo>−</mo><msub><mi>π</mi><mi>i</mi></msub><mo stretchy="false" form="postfix">)</mo><msub><mi>f</mi><mrow><mi>N</mi><mi>B</mi></mrow></msub><mo stretchy="false" form="prefix">(</mo><mi>y</mi><mo>;</mo><msub><mi>μ</mi><mi>i</mi></msub><mo>,</mo><mi>θ</mi><mo stretchy="false" form="postfix">)</mo><mo>,</mo><mspace width="0.222em"></mspace><mi>y</mi><mo>≥</mo><mn>1</mn><mo>,</mo></mrow><annotation encoding="application/x-tex">
+P(Y_i = 0) = \pi_i + (1 - \pi_i)f_{NB}(0;\mu_i,\theta), \qquad P(Y_i = y) = (1 - \pi_i)f_{NB}(y;\mu_i,\theta),\ y \ge 1,
+</annotation></semantics></math> and <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mi>E</mi><mo stretchy="false" form="prefix">(</mo><msub><mi>Y</mi><mi>i</mi></msub><mo stretchy="false" form="postfix">)</mo><mo>=</mo><mo stretchy="false" form="prefix">(</mo><mn>1</mn><mo>−</mo><msub><mi>π</mi><mi>i</mi></msub><mo stretchy="false" form="postfix">)</mo><msub><mi>μ</mi><mi>i</mi></msub></mrow><annotation encoding="application/x-tex">E(Y_i) = (1 - \pi_i)\mu_i</annotation></semantics></math>. The observed-data log-likelihood contains the logarithm of a sum for the zeros, so it is not the log-likelihood of an exponential-family GLM and IRLS cannot be applied to it directly. Had the latent indicators <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><msub><mi>D</mi><mi>i</mi></msub><annotation encoding="application/x-tex">D_i</annotation></semantics></math> (1 for a structural zero) been observed, the problem would separate into a logistic regression for <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mi>γ</mi><annotation encoding="application/x-tex">\gamma</annotation></semantics></math> and an NB fit for <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mo stretchy="false" form="prefix">(</mo><mi>β</mi><mo>,</mo><mi>θ</mi><mo stretchy="false" form="postfix">)</mo></mrow><annotation encoding="application/x-tex">(\beta, \theta)</annotation></semantics></math> on the non-structural observations. The EM algorithm exploits this.</p>
+<p><strong>E-step.</strong> Given current <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mo stretchy="false" form="prefix">(</mo><mi>β</mi><mo>,</mo><mi>γ</mi><mo>,</mo><mi>θ</mi><mo stretchy="false" form="postfix">)</mo></mrow><annotation encoding="application/x-tex">(\beta, \gamma, \theta)</annotation></semantics></math>, compute the posterior probability of a structural zero, <math display="block" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><msub><mi>τ</mi><mi>i</mi></msub><mo>=</mo><mi>P</mi><mo stretchy="false" form="prefix">(</mo><msub><mi>D</mi><mi>i</mi></msub><mo>=</mo><mn>1</mn><mo>∣</mo><msub><mi>y</mi><mi>i</mi></msub><mo stretchy="false" form="postfix">)</mo><mo>=</mo><mrow><mo stretchy="true" form="prefix">{</mo><mtable><mtr><mtd columnalign="left" style="text-align: left"><mstyle displaystyle="true"><mfrac><msub><mi>π</mi><mi>i</mi></msub><mrow><msub><mi>π</mi><mi>i</mi></msub><mo>+</mo><mo stretchy="false" form="prefix">(</mo><mn>1</mn><mo>−</mo><msub><mi>π</mi><mi>i</mi></msub><mo stretchy="false" form="postfix">)</mo><msub><mi>f</mi><mrow><mi>N</mi><mi>B</mi></mrow></msub><mo stretchy="false" form="prefix">(</mo><mn>0</mn><mo>;</mo><msub><mi>μ</mi><mi>i</mi></msub><mo>,</mo><mi>θ</mi><mo stretchy="false" form="postfix">)</mo></mrow></mfrac></mstyle><mo>,</mo></mtd><mtd columnalign="left" style="text-align: left"><msub><mi>y</mi><mi>i</mi></msub><mo>=</mo><mn>0</mn><mo>,</mo></mtd></mtr><mtr><mtd columnalign="left" style="text-align: left"><mn>0</mn><mo>,</mo></mtd><mtd columnalign="left" style="text-align: left"><msub><mi>y</mi><mi>i</mi></msub><mo>&gt;</mo><mn>0</mn><mi>.</mi></mtd></mtr></mtable></mrow></mrow><annotation encoding="application/x-tex">
+\tau_i = P(D_i = 1 \mid y_i) = \begin{cases} \dfrac{\pi_i}{\pi_i + (1 - \pi_i)f_{NB}(0;\mu_i,\theta)}, &amp; y_i = 0,\\[2ex] 0, &amp; y_i &gt; 0. \end{cases}
+</annotation></semantics></math> In the code this is evaluated as <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><msub><mi>τ</mi><mi>i</mi></msub><mo>=</mo><mrow><mi mathvariant="normal">p</mi><mi mathvariant="normal">l</mi><mi mathvariant="normal">o</mi><mi mathvariant="normal">g</mi><mi mathvariant="normal">i</mi><mi mathvariant="normal">s</mi></mrow><mo stretchy="false" form="prefix">{</mo><msubsup><mi>z</mi><mi>i</mi><mi>⊤</mi></msubsup><mi>γ</mi><mo>−</mo><mrow><mi mathvariant="normal">log</mi><mo>⁡</mo></mrow><msub><mi>f</mi><mrow><mi>N</mi><mi>B</mi></mrow></msub><mo stretchy="false" form="prefix">(</mo><mn>0</mn><mo>;</mo><msub><mi>μ</mi><mi>i</mi></msub><mo>,</mo><mi>θ</mi><mo stretchy="false" form="postfix">)</mo><mo stretchy="false" form="postfix">}</mo></mrow><annotation encoding="application/x-tex">\tau_i = \mathrm{plogis}\{z_i^\top\gamma - \log f_{NB}(0;\mu_i,\theta)\}</annotation></semantics></math> for zeros, which is numerically stable.</p>
+<p><strong>M-step, zero part.</strong> Maximize <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><msub><mo>∑</mo><mi>i</mi></msub><mo stretchy="false" form="prefix">{</mo><msub><mi>τ</mi><mi>i</mi></msub><mrow><mi mathvariant="normal">log</mi><mo>⁡</mo></mrow><msub><mi>π</mi><mi>i</mi></msub><mo>+</mo><mo stretchy="false" form="prefix">(</mo><mn>1</mn><mo>−</mo><msub><mi>τ</mi><mi>i</mi></msub><mo stretchy="false" form="postfix">)</mo><mrow><mi mathvariant="normal">log</mi><mo>⁡</mo></mrow><mo stretchy="false" form="prefix">(</mo><mn>1</mn><mo>−</mo><msub><mi>π</mi><mi>i</mi></msub><mo stretchy="false" form="postfix">)</mo><mo stretchy="false" form="postfix">}</mo></mrow><annotation encoding="application/x-tex">\sum_i \{\tau_i\log\pi_i + (1 - \tau_i)\log(1 - \pi_i)\}</annotation></semantics></math> over <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mi>γ</mi><annotation encoding="application/x-tex">\gamma</annotation></semantics></math>. This is a logistic regression with fractional response <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><msub><mi>τ</mi><mi>i</mi></msub><annotation encoding="application/x-tex">\tau_i</annotation></semantics></math>, fitted by IRLS with <math display="block" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><msub><mi>w</mi><mi>i</mi></msub><mo>=</mo><msub><mi>π</mi><mi>i</mi></msub><mo stretchy="false" form="prefix">(</mo><mn>1</mn><mo>−</mo><msub><mi>π</mi><mi>i</mi></msub><mo stretchy="false" form="postfix">)</mo><mo>,</mo><mspace width="2.0em"></mspace><msub><mi>u</mi><mi>i</mi></msub><mo>=</mo><msubsup><mi>z</mi><mi>i</mi><mi>⊤</mi></msubsup><mi>γ</mi><mo>+</mo><mfrac><mrow><msub><mi>τ</mi><mi>i</mi></msub><mo>−</mo><msub><mi>π</mi><mi>i</mi></msub></mrow><mrow><msub><mi>π</mi><mi>i</mi></msub><mo stretchy="false" form="prefix">(</mo><mn>1</mn><mo>−</mo><msub><mi>π</mi><mi>i</mi></msub><mo stretchy="false" form="postfix">)</mo></mrow></mfrac><mi>.</mi></mrow><annotation encoding="application/x-tex">
+w_i = \pi_i(1 - \pi_i), \qquad u_i = z_i^\top\gamma + \frac{\tau_i - \pi_i}{\pi_i(1 - \pi_i)} .
+</annotation></semantics></math></p>
+<p><strong>M-step, count part.</strong> Maximize <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><msub><mo>∑</mo><mi>i</mi></msub><mo stretchy="false" form="prefix">(</mo><mn>1</mn><mo>−</mo><msub><mi>τ</mi><mi>i</mi></msub><mo stretchy="false" form="postfix">)</mo><mrow><mi mathvariant="normal">log</mi><mo>⁡</mo></mrow><msub><mi>f</mi><mrow><mi>N</mi><mi>B</mi></mrow></msub><mo stretchy="false" form="prefix">(</mo><msub><mi>y</mi><mi>i</mi></msub><mo>;</mo><msub><mi>μ</mi><mi>i</mi></msub><mo>,</mo><mi>θ</mi><mo stretchy="false" form="postfix">)</mo></mrow><annotation encoding="application/x-tex">\sum_i (1 - \tau_i)\log f_{NB}(y_i;\mu_i,\theta)</annotation></semantics></math> over <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mo stretchy="false" form="prefix">(</mo><mi>β</mi><mo>,</mo><mi>θ</mi><mo stretchy="false" form="postfix">)</mo></mrow><annotation encoding="application/x-tex">(\beta, \theta)</annotation></semantics></math>. This is exactly the NB fit above with prior weights <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><msub><mi>a</mi><mi>i</mi></msub><mo>=</mo><mn>1</mn><mo>−</mo><msub><mi>τ</mi><mi>i</mi></msub></mrow><annotation encoding="application/x-tex">a_i = 1 - \tau_i</annotation></semantics></math>, so the same code is reused, warm-started at the current values.</p>
+<p><strong>Starting values and convergence.</strong> <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mo stretchy="false" form="prefix">(</mo><mi>β</mi><mo>,</mo><mi>θ</mi><mo stretchy="false" form="postfix">)</mo></mrow><annotation encoding="application/x-tex">(\beta, \theta)</annotation></semantics></math> start at the plain NB fit and <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mi>γ</mi><annotation encoding="application/x-tex">\gamma</annotation></semantics></math> at a logistic IRLS fit of <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mi>I</mi><mo stretchy="false" form="prefix">(</mo><msub><mi>y</mi><mi>i</mi></msub><mo>=</mo><mn>0</mn><mo stretchy="false" form="postfix">)</mo></mrow><annotation encoding="application/x-tex">I(y_i = 0)</annotation></semantics></math> on <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><msub><mi>z</mi><mi>i</mi></msub><annotation encoding="application/x-tex">z_i</annotation></semantics></math>. The algorithm stops when the observed-data log-likelihood changes by a relative amount below <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><msup><mn>10</mn><mrow><mi>−</mi><mn>12</mn></mrow></msup><annotation encoding="application/x-tex">10^{-12}</annotation></semantics></math>. EM never decreases the observed-data log-likelihood, and the package stores the log-likelihood at every iteration so this can be checked directly (Section 4).</p>
+</section>
+<section id="standard-errors" class="level2" data-number="2.3">
+<h2 data-number="2.3"><span class="header-section-number">2.3</span> Standard errors</h2>
+<p>For NB regression, <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mover><mrow><mi mathvariant="normal">V</mi><mi mathvariant="normal">a</mi><mi mathvariant="normal">r</mi></mrow><mo accent="true">̂</mo></mover><mo stretchy="false" form="prefix">(</mo><mover><mi>β</mi><mo accent="true">̂</mo></mover><mo stretchy="false" form="postfix">)</mo><mo>=</mo><mo stretchy="false" form="prefix">(</mo><msup><mi>X</mi><mi>⊤</mi></msup><mover><mi>W</mi><mo accent="true">̂</mo></mover><mi>X</mi><msup><mo stretchy="false" form="postfix">)</mo><mrow><mi>−</mi><mn>1</mn></mrow></msup></mrow><annotation encoding="application/x-tex">\widehat{\mathrm{Var}}(\hat\beta) = (X^\top\hat W X)^{-1}</annotation></semantics></math>, treating <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mi>θ</mi><annotation encoding="application/x-tex">\theta</annotation></semantics></math> as known as <code>glm.nb()</code> does, and <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mrow><mi mathvariant="normal">S</mi><mi mathvariant="normal">E</mi></mrow><mo stretchy="false" form="prefix">(</mo><mover><mi>θ</mi><mo accent="true">̂</mo></mover><mo stretchy="false" form="postfix">)</mo><mo>=</mo><mo stretchy="false" form="prefix">{</mo><mi>−</mi><mi>H</mi><mo stretchy="false" form="prefix">(</mo><mover><mi>θ</mi><mo accent="true">̂</mo></mover><mo stretchy="false" form="postfix">)</mo><msup><mo stretchy="false" form="postfix">}</mo><mrow><mi>−</mi><mn>1</mn><mi>/</mi><mn>2</mn></mrow></msup></mrow><annotation encoding="application/x-tex">\mathrm{SE}(\hat\theta) = \{-H(\hat\theta)\}^{-1/2}</annotation></semantics></math>.</p>
+<p>EM does not produce standard errors, so for ZINB the observed information matrix of the observed-data log-likelihood is computed at the maximum likelihood estimate with respect to <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mo stretchy="false" form="prefix">(</mo><mi>β</mi><mo>,</mo><mi>γ</mi><mo>,</mo><mrow><mi mathvariant="normal">log</mi><mo>⁡</mo></mrow><mi>θ</mi><mo stretchy="false" form="postfix">)</mo></mrow><annotation encoding="application/x-tex">(\beta, \gamma, \log\theta)</annotation></semantics></math>, and its inverse gives the covariance matrix. The Hessian is derived analytically. For each observation let <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><msub><mi>η</mi><mi>i</mi></msub><mo>=</mo><msubsup><mi>x</mi><mi>i</mi><mi>⊤</mi></msubsup><mi>β</mi><mo>+</mo><msub><mi>o</mi><mi>i</mi></msub></mrow><annotation encoding="application/x-tex">\eta_i = x_i^\top\beta + o_i</annotation></semantics></math>, <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><msub><mi>ζ</mi><mi>i</mi></msub><mo>=</mo><msubsup><mi>z</mi><mi>i</mi><mi>⊤</mi></msubsup><mi>γ</mi></mrow><annotation encoding="application/x-tex">\zeta_i = z_i^\top\gamma</annotation></semantics></math>, and <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mi>ϕ</mi><mo>=</mo><mrow><mi mathvariant="normal">log</mi><mo>⁡</mo></mrow><mi>θ</mi></mrow><annotation encoding="application/x-tex">\phi = \log\theta</annotation></semantics></math>. For <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><msub><mi>y</mi><mi>i</mi></msub><mo>&gt;</mo><mn>0</mn></mrow><annotation encoding="application/x-tex">y_i &gt; 0</annotation></semantics></math> the contribution is <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mrow><mi mathvariant="normal">log</mi><mo>⁡</mo></mrow><mo stretchy="false" form="prefix">(</mo><mn>1</mn><mo>−</mo><msub><mi>π</mi><mi>i</mi></msub><mo stretchy="false" form="postfix">)</mo><mo>+</mo><mrow><mi mathvariant="normal">log</mi><mo>⁡</mo></mrow><msub><mi>f</mi><mrow><mi>N</mi><mi>B</mi></mrow></msub></mrow><annotation encoding="application/x-tex">\log(1 - \pi_i) + \log f_{NB}</annotation></semantics></math>, whose second derivatives are those of the NB log-density in <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mo stretchy="false" form="prefix">(</mo><mi>η</mi><mo>,</mo><mi>ϕ</mi><mo stretchy="false" form="postfix">)</mo></mrow><annotation encoding="application/x-tex">(\eta, \phi)</annotation></semantics></math> together with <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mi>−</mi><msub><mi>π</mi><mi>i</mi></msub><mo stretchy="false" form="prefix">(</mo><mn>1</mn><mo>−</mo><msub><mi>π</mi><mi>i</mi></msub><mo stretchy="false" form="postfix">)</mo></mrow><annotation encoding="application/x-tex">-\pi_i(1 - \pi_i)</annotation></semantics></math> for <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mi>ζ</mi><annotation encoding="application/x-tex">\zeta</annotation></semantics></math>. For <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><msub><mi>y</mi><mi>i</mi></msub><mo>=</mo><mn>0</mn></mrow><annotation encoding="application/x-tex">y_i = 0</annotation></semantics></math> the contribution is <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mrow><mi mathvariant="normal">log</mi><mo>⁡</mo></mrow><msub><mi>P</mi><mi>i</mi></msub></mrow><annotation encoding="application/x-tex">\log P_i</annotation></semantics></math> with <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><msub><mi>P</mi><mi>i</mi></msub><mo>=</mo><msub><mi>π</mi><mi>i</mi></msub><mo>+</mo><mo stretchy="false" form="prefix">(</mo><mn>1</mn><mo>−</mo><msub><mi>π</mi><mi>i</mi></msub><mo stretchy="false" form="postfix">)</mo><msub><mi>f</mi><mn>0</mn></msub></mrow><annotation encoding="application/x-tex">P_i = \pi_i + (1 - \pi_i)f_0</annotation></semantics></math>, so each second derivative is <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><msub><mi>P</mi><mrow><mi>a</mi><mi>b</mi></mrow></msub><mi>/</mi><mi>P</mi><mo>−</mo><msub><mi>P</mi><mi>a</mi></msub><msub><mi>P</mi><mi>b</mi></msub><mi>/</mi><msup><mi>P</mi><mn>2</mn></msup></mrow><annotation encoding="application/x-tex">P_{ab}/P - P_aP_b/P^2</annotation></semantics></math> with the partial derivatives of <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><msub><mi>P</mi><mi>i</mi></msub><annotation encoding="application/x-tex">P_i</annotation></semantics></math> available in closed form. The per-observation derivatives are assembled into the block Hessian <math display="block" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mi>H</mi><mo>=</mo><mrow><mo stretchy="true" form="prefix">(</mo><mtable><mtr><mtd columnalign="center" style="text-align: center"><msup><mi>X</mi><mi>⊤</mi></msup><msub><mi>D</mi><mrow><mi>η</mi><mi>η</mi></mrow></msub><mi>X</mi></mtd><mtd columnalign="center" style="text-align: center"><msup><mi>X</mi><mi>⊤</mi></msup><msub><mi>D</mi><mrow><mi>η</mi><mi>ζ</mi></mrow></msub><mi>Z</mi></mtd><mtd columnalign="center" style="text-align: center"><msup><mi>X</mi><mi>⊤</mi></msup><msub><mi>d</mi><mrow><mi>η</mi><mi>ϕ</mi></mrow></msub></mtd></mtr><mtr><mtd columnalign="center" style="text-align: center"><mi>⋅</mi></mtd><mtd columnalign="center" style="text-align: center"><msup><mi>Z</mi><mi>⊤</mi></msup><msub><mi>D</mi><mrow><mi>ζ</mi><mi>ζ</mi></mrow></msub><mi>Z</mi></mtd><mtd columnalign="center" style="text-align: center"><msup><mi>Z</mi><mi>⊤</mi></msup><msub><mi>d</mi><mrow><mi>ζ</mi><mi>ϕ</mi></mrow></msub></mtd></mtr><mtr><mtd columnalign="center" style="text-align: center"><mi>⋅</mi></mtd><mtd columnalign="center" style="text-align: center"><mi>⋅</mi></mtd><mtd columnalign="center" style="text-align: center"><munder><mo>∑</mo><mi>i</mi></munder><msub><mi>h</mi><mrow><mi>ϕ</mi><mi>ϕ</mi><mo>,</mo><mi>i</mi></mrow></msub></mtd></mtr></mtable><mo stretchy="true" form="postfix">)</mo></mrow><mi>.</mi></mrow><annotation encoding="application/x-tex">
+H = \begin{pmatrix} X^\top D_{\eta\eta}X &amp; X^\top D_{\eta\zeta}Z &amp; X^\top d_{\eta\phi}\\ \cdot &amp; Z^\top D_{\zeta\zeta}Z &amp; Z^\top d_{\zeta\phi}\\ \cdot &amp; \cdot &amp; \sum_i h_{\phi\phi,i}\end{pmatrix}.
+</annotation></semantics></math> The standard error of <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mover><mi>θ</mi><mo accent="true">̂</mo></mover><annotation encoding="application/x-tex">\hat\theta</annotation></semantics></math> follows from the delta method, <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mrow><mi mathvariant="normal">S</mi><mi mathvariant="normal">E</mi></mrow><mo stretchy="false" form="prefix">(</mo><mover><mi>θ</mi><mo accent="true">̂</mo></mover><mo stretchy="false" form="postfix">)</mo><mo>=</mo><mover><mi>θ</mi><mo accent="true">̂</mo></mover><mspace width="0.167em"></mspace><mrow><mi mathvariant="normal">S</mi><mi mathvariant="normal">E</mi></mrow><mo stretchy="false" form="prefix">(</mo><mrow><mi mathvariant="normal">log</mi><mo>⁡</mo></mrow><mover><mi>θ</mi><mo accent="true">̂</mo></mover><mo stretchy="false" form="postfix">)</mo></mrow><annotation encoding="application/x-tex">\mathrm{SE}(\hat\theta) = \hat\theta\,\mathrm{SE}(\log\hat\theta)</annotation></semantics></math>. As a check, the analytic Hessian is compared with <code>numDeriv::hessian()</code> applied to the package’s own log-likelihood function in Section 4.</p>
+</section>
+</section>
+<section id="the-r-package" class="level1" data-number="3">
+<h1 data-number="3"><span class="header-section-number">3</span> The R package</h1>
+<p>The package is available at <a href="https://github.com/JosephTruitt/zinbTruitt" class="uri">https://github.com/JosephTruitt/zinbTruitt</a> and installs with</p>
+<div class="sourceCode" id="cb1"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb1-1"><a href="#cb1-1" aria-hidden="true" tabindex="-1"></a><span class="co"># install.packages("devtools")</span></span>
+<span id="cb1-2"><a href="#cb1-2" aria-hidden="true" tabindex="-1"></a>devtools<span class="sc">::</span><span class="fu">install_github</span>(<span class="st">"JosephTruitt/zinbTruitt"</span>)</span></code></pre></div>
+<p>Its main functions are summarized in <a href="#tbl-funs" class="quarto-xref">Table&nbsp;1</a>.</p>
+<div class="cell">
+<div id="tbl-funs" class="cell quarto-float quarto-figure quarto-figure-center">
+<figure class="quarto-float quarto-float-tbl">
+<figcaption class="quarto-float-caption-top quarto-float-caption quarto-float-tbl" id="tbl-funs-caption-0ceaefa1-69ba-4598-a22c-09a6ac19f8ca">
+Table&nbsp;1: Exported functions of the zinbTruitt package.
+</figcaption>
+<div aria-describedby="tbl-funs-caption-0ceaefa1-69ba-4598-a22c-09a6ac19f8ca">
+<div class="cell-output-display">
+<table class="cell caption-top">
+<colgroup>
+<col style="width: 34%">
+<col style="width: 65%">
+</colgroup>
+<thead>
+<tr class="header">
+<th style="text-align: left;">Function</th>
+<th style="text-align: left;">Purpose</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td style="text-align: left;">nbreg(formula, data, offset, control)</td>
+<td style="text-align: left;">NB regression by IRLS and Newton–Raphson</td>
+</tr>
+<tr class="even">
+<td style="text-align: left;">zinbreg(formula, data, offset, control)</td>
+<td style="text-align: left;">ZINB regression by EM with IRLS M-steps; formula y ~ x1 + x2 | z1 + z2</td>
+</tr>
+<tr class="odd">
+<td style="text-align: left;">nbreg_control(), zinbreg_control()</td>
+<td style="text-align: left;">Tolerances, maximum iterations, trace option</td>
+</tr>
+</tbody>
+</table>
+</div>
+</div>
+</figure>
+</div>
+</div>
+<p>Both fitting functions return S3 objects (classes <code>"nbreg"</code> and <code>"zinbreg"</code>) that store the coefficients, covariance matrix, <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mover><mi>θ</mi><mo accent="true">̂</mo></mover><annotation encoding="application/x-tex">\hat\theta</annotation></semantics></math> and its standard error, log-likelihood, iteration count, convergence flag, fitted values, and the matched call. The methods <code>print</code>, <code>summary</code>, <code>coef</code>, <code>vcov</code>, <code>logLik</code> (with a <code>df</code> attribute, so <code>AIC()</code> and <code>BIC()</code> work), <code>fitted</code>, <code>residuals</code> (Pearson and response), <code>nobs</code>, and <code>predict</code> (with <code>newdata</code>) are provided for both classes. For <code>zinbreg</code>, <code>predict</code> accepts <code>type = "response"</code> for <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mo stretchy="false" form="prefix">(</mo><mn>1</mn><mo>−</mo><mi>π</mi><mo stretchy="false" form="postfix">)</mo><mi>μ</mi></mrow><annotation encoding="application/x-tex">(1 - \pi)\mu</annotation></semantics></math>, <code>"count"</code> for <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mi>μ</mi><annotation encoding="application/x-tex">\mu</annotation></semantics></math>, and <code>"zero"</code> for <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mi>π</mi><annotation encoding="application/x-tex">\pi</annotation></semantics></math>. Wald intervals are available through <code>confint()</code>. Without a <code>|</code> in the formula, <code>zinbreg</code> uses the same covariates in both parts, as <code>zeroinfl()</code> does. The package is documented with roxygen2, tested with testthat (including comparisons against <code>glm.nb()</code> and <code>zeroinfl()</code>), and checked on Windows, macOS, and Linux by GitHub Actions. A short usage example:</p>
+<div class="cell">
+<div class="sourceCode cell-code" id="cb2"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb2-1"><a href="#cb2-1" aria-hidden="true" tabindex="-1"></a>fit_nb   <span class="ot">&lt;-</span> <span class="fu">nbreg</span>(art <span class="sc">~</span> fem <span class="sc">+</span> mar <span class="sc">+</span> kid5 <span class="sc">+</span> phd <span class="sc">+</span> ment, <span class="at">data =</span> bioChemists)</span>
+<span id="cb2-2"><a href="#cb2-2" aria-hidden="true" tabindex="-1"></a>fit_zinb <span class="ot">&lt;-</span> <span class="fu">zinbreg</span>(art <span class="sc">~</span> fem <span class="sc">+</span> mar <span class="sc">+</span> kid5 <span class="sc">+</span> phd <span class="sc">+</span> ment <span class="sc">|</span> fem <span class="sc">+</span> kid5 <span class="sc">+</span> ment,</span>
+<span id="cb2-3"><a href="#cb2-3" aria-hidden="true" tabindex="-1"></a>                    <span class="at">data =</span> bioChemists)</span>
+<span id="cb2-4"><a href="#cb2-4" aria-hidden="true" tabindex="-1"></a><span class="fu">AIC</span>(fit_nb, fit_zinb)</span></code></pre></div>
+<div class="cell-output cell-output-stdout">
+<pre><code>         df      AIC
+fit_nb    7 3135.917
+fit_zinb 11 3125.049</code></pre>
+</div>
+<div class="sourceCode cell-code" id="cb4"><pre class="sourceCode r"><code class="sourceCode r"><span id="cb4-1"><a href="#cb4-1" aria-hidden="true" tabindex="-1"></a><span class="fu">predict</span>(fit_zinb, <span class="at">newdata =</span> bioChemists[<span class="dv">1</span><span class="sc">:</span><span class="dv">3</span>, ], <span class="at">type =</span> <span class="st">"zero"</span>)</span></code></pre></div>
+<div class="cell-output cell-output-stdout">
+<pre><code>           1            2            3 
+0.0008138696 0.0066822590 0.0066822590 </code></pre>
+</div>
+</div>
+</section>
+<section id="benchmarking" class="level1" data-number="4">
+<h1 data-number="4"><span class="header-section-number">4</span> Benchmarking</h1>
+<p>The fits from <code>nbreg()</code> and <code>zinbreg()</code> were compared with <code>MASS::glm.nb()</code> and <code>pscl::zeroinfl(..., dist = "negbin")</code> on <code>pscl::bioChemists</code> (915 biochemistry PhD students; response <code>art</code>) and <code>AER::NMES1988</code> (4,406 individuals; response <code>visits</code>). The reference functions were run with tight tolerances (<code>epsilon = 1e-10</code> for <code>glm.nb()</code> and <code>reltol = 1e-12</code> for <code>zeroinfl()</code>). The NB models use all covariates in the count part; the ZINB models use the same covariates in the count part and, for bioChemists, in the zero part, and for NMES1988 the covariates of Section 6.</p>
+<p><a href="#tbl-agree" class="quarto-xref">Table&nbsp;2</a> reports the maximum absolute differences between the two implementations, and the full side-by-side estimates are in Appendix A. All differences are well inside the required tolerances (the “Theta” column is <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mi>θ</mi><annotation encoding="application/x-tex">\theta</annotation></semantics></math> for NB and <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mrow><mi mathvariant="normal">log</mi><mo>⁡</mo></mrow><mi>θ</mi></mrow><annotation encoding="application/x-tex">\log\theta</annotation></semantics></math> for ZINB). The remaining ZINB differences of order <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><msup><mn>10</mn><mrow><mi>−</mi><mn>5</mn></mrow></msup><annotation encoding="application/x-tex">10^{-5}</annotation></semantics></math> reflect the stopping rules of the two optimizers: on bioChemists, when both are run to very tight tolerances, the coefficients agree to about <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mn>2</mn><mo>×</mo><msup><mn>10</mn><mrow><mi>−</mi><mn>6</mn></mrow></msup></mrow><annotation encoding="application/x-tex">2 \times 10^{-6}</annotation></semantics></math>.</p>
+<div class="cell">
+<div id="tbl-agree" class="cell quarto-float quarto-figure quarto-figure-center">
+<figure class="quarto-float quarto-float-tbl">
+<figcaption class="quarto-float-caption-top quarto-float-caption quarto-float-tbl" id="tbl-agree-caption-0ceaefa1-69ba-4598-a22c-09a6ac19f8ca">
+Table&nbsp;2: Maximum absolute difference between zinbTruitt and the reference functions. Tolerances (coefficients / standard errors / theta / log-likelihood): NB 1e-5, 1e-5, 1e-4, 1e-4; ZINB 1e-3 for all.
+</figcaption>
+<div aria-describedby="tbl-agree-caption-0ceaefa1-69ba-4598-a22c-09a6ac19f8ca">
+<div class="cell-output-display">
+<table class="cell caption-top">
+<thead>
+<tr class="header">
+<th style="text-align: left;">Data</th>
+<th style="text-align: left;">Model</th>
+<th style="text-align: left;">Coefficients</th>
+<th style="text-align: left;">Std. errors</th>
+<th style="text-align: left;">Theta</th>
+<th style="text-align: left;">Log-lik.</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td style="text-align: left;">bioChemists</td>
+<td style="text-align: left;">NB</td>
+<td style="text-align: left;">7.8e-09</td>
+<td style="text-align: left;">8.2e-11</td>
+<td style="text-align: left;">3.0e-09</td>
+<td style="text-align: left;">0.0e+00</td>
+</tr>
+<tr class="even">
+<td style="text-align: left;">bioChemists</td>
+<td style="text-align: left;">ZINB</td>
+<td style="text-align: left;">5.8e-05</td>
+<td style="text-align: left;">3.5e-05</td>
+<td style="text-align: left;">4.9e-06</td>
+<td style="text-align: left;">6.2e-09</td>
+</tr>
+<tr class="odd">
+<td style="text-align: left;">NMES1988</td>
+<td style="text-align: left;">NB</td>
+<td style="text-align: left;">6.2e-08</td>
+<td style="text-align: left;">1.7e-10</td>
+<td style="text-align: left;">1.3e-09</td>
+<td style="text-align: left;">1.8e-12</td>
+</tr>
+<tr class="even">
+<td style="text-align: left;">NMES1988</td>
+<td style="text-align: left;">ZINB</td>
+<td style="text-align: left;">3.3e-05</td>
+<td style="text-align: left;">2.2e-05</td>
+<td style="text-align: left;">5.2e-06</td>
+<td style="text-align: left;">2.4e-08</td>
+</tr>
+</tbody>
+</table>
+</div>
+</div>
+</figure>
+</div>
+</div>
+<p><a href="#tbl-timing" class="quarto-xref">Table&nbsp;3</a> compares median computation times over five fits. The NB fit is about twice as fast as <code>glm.nb()</code>; the ZINB fit is slower than <code>zeroinfl()</code> because EM is a first-order method that needs tens to over a hundred iterations, while BFGS exploits curvature information. The package is not designed to be faster.</p>
+<div class="cell">
+<div id="tbl-timing" class="cell quarto-float quarto-figure quarto-figure-center">
+<figure class="quarto-float quarto-float-tbl">
+<figcaption class="quarto-float-caption-top quarto-float-caption quarto-float-tbl" id="tbl-timing-caption-0ceaefa1-69ba-4598-a22c-09a6ac19f8ca">
+Table&nbsp;3: Median elapsed time (seconds) over five fits, and number of iterations of the package’s algorithm (outer iterations for NB, EM iterations for ZINB).
+</figcaption>
+<div aria-describedby="tbl-timing-caption-0ceaefa1-69ba-4598-a22c-09a6ac19f8ca">
+<div class="cell-output-display">
+<table class="cell caption-top">
+<thead>
+<tr class="header">
+<th style="text-align: left;">Data</th>
+<th style="text-align: left;">Model</th>
+<th style="text-align: left;">Ours</th>
+<th style="text-align: left;">Reference</th>
+<th style="text-align: right;">Iterations</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td style="text-align: left;">bioChemists</td>
+<td style="text-align: left;">NB</td>
+<td style="text-align: left;">0.030</td>
+<td style="text-align: left;">0.040</td>
+<td style="text-align: right;">4</td>
+</tr>
+<tr class="even">
+<td style="text-align: left;">bioChemists</td>
+<td style="text-align: left;">ZINB</td>
+<td style="text-align: left;">1.140</td>
+<td style="text-align: left;">0.170</td>
+<td style="text-align: right;">121</td>
+</tr>
+<tr class="odd">
+<td style="text-align: left;">NMES1988</td>
+<td style="text-align: left;">NB</td>
+<td style="text-align: left;">0.090</td>
+<td style="text-align: left;">0.170</td>
+<td style="text-align: right;">3</td>
+</tr>
+<tr class="even">
+<td style="text-align: left;">NMES1988</td>
+<td style="text-align: left;">ZINB</td>
+<td style="text-align: left;">2.150</td>
+<td style="text-align: left;">0.890</td>
+<td style="text-align: right;">52</td>
+</tr>
+</tbody>
+</table>
+</div>
+</div>
+</figure>
+</div>
+</div>
+<p>Two further checks support the implementation. First, the observed-data log-likelihood never decreased across EM iterations in any ZINB fit (monotone for all fits: TRUE), as theory requires. Second, the analytic Hessian agrees with the numerical Hessian from <code>numDeriv</code> to a maximum relative difference of 1.1e-09 on a ZINB fit to bioChemists with different count and zero covariates.</p>
+</section>
+<section id="simulation-study" class="level1" data-number="5">
+<h1 data-number="5"><span class="header-section-number">5</span> Simulation study</h1>
+<p>To check that <code>zinbreg()</code> recovers known parameters, <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mi>R</mi><mo>=</mo><mn>200</mn></mrow><annotation encoding="application/x-tex">R = 200</annotation></semantics></math> data sets of size <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mi>n</mi><mo>=</mo><mn>500</mn></mrow><annotation encoding="application/x-tex">n = 500</annotation></semantics></math> were simulated from a ZINB model with one covariate in each part: <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mrow><mi mathvariant="normal">log</mi><mo>⁡</mo></mrow><msub><mi>μ</mi><mi>i</mi></msub><mo>=</mo><mn>1</mn><mo>+</mo><mn>0.5</mn><msub><mi>x</mi><mi>i</mi></msub></mrow><annotation encoding="application/x-tex">\log\mu_i = 1 + 0.5x_i</annotation></semantics></math>, <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mrow><mi mathvariant="normal">l</mi><mi mathvariant="normal">o</mi><mi mathvariant="normal">g</mi><mi mathvariant="normal">i</mi><mi mathvariant="normal">t</mi></mrow><mspace width="0.167em"></mspace><msub><mi>π</mi><mi>i</mi></msub><mo>=</mo><mi>−</mi><mn>1</mn><mo>+</mo><mn>0.8</mn><msub><mi>z</mi><mi>i</mi></msub></mrow><annotation encoding="application/x-tex">\mathrm{logit}\,\pi_i = -1 + 0.8z_i</annotation></semantics></math>, and <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mi>θ</mi><mo>=</mo><mn>2</mn></mrow><annotation encoding="application/x-tex">\theta = 2</annotation></semantics></math>, with <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><msub><mi>x</mi><mi>i</mi></msub><mo>,</mo><msub><mi>z</mi><mi>i</mi></msub><mo>∼</mo><mi>N</mi><mo stretchy="false" form="prefix">(</mo><mn>0</mn><mo>,</mo><mn>1</mn><mo stretchy="false" form="postfix">)</mo></mrow><annotation encoding="application/x-tex">x_i, z_i \sim N(0,1)</annotation></semantics></math> independent. The seed was fixed (651). For each parameter, <a href="#tbl-sim" class="quarto-xref">Table&nbsp;4</a> reports the mean estimate, the bias, the Monte Carlo standard deviation of the estimates, the mean of the estimated standard errors, and the empirical coverage of 95% Wald intervals. The parameter <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mrow><mi mathvariant="normal">log</mi><mo>⁡</mo></mrow><mi>θ</mi></mrow><annotation encoding="application/x-tex">\log\theta</annotation></semantics></math> is reported because the Wald interval is constructed on that scale.</p>
+<div class="cell">
+<div id="tbl-sim" class="cell quarto-float quarto-figure quarto-figure-center">
+<figure class="quarto-float quarto-float-tbl">
+<figcaption class="quarto-float-caption-top quarto-float-caption quarto-float-tbl" id="tbl-sim-caption-0ceaefa1-69ba-4598-a22c-09a6ac19f8ca">
+Table&nbsp;4: Simulation results (R = 200, n = 500): bias, Monte Carlo SD of the estimates, mean estimated standard error, and coverage of 95% Wald intervals.
+</figcaption>
+<div aria-describedby="tbl-sim-caption-0ceaefa1-69ba-4598-a22c-09a6ac19f8ca">
+<div class="cell-output-display">
+<table class="cell caption-top">
+<thead>
+<tr class="header">
+<th style="text-align: left;">Parameter</th>
+<th style="text-align: left;">Truth</th>
+<th style="text-align: left;">Mean</th>
+<th style="text-align: left;">Bias</th>
+<th style="text-align: left;">MC SD</th>
+<th style="text-align: left;">Mean SE</th>
+<th style="text-align: left;">Coverage</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td style="text-align: left;">Count intercept</td>
+<td style="text-align: left;">1.000</td>
+<td style="text-align: left;">0.998</td>
+<td style="text-align: left;">-0.002</td>
+<td style="text-align: left;">0.068</td>
+<td style="text-align: left;">0.065</td>
+<td style="text-align: left;">0.915</td>
+</tr>
+<tr class="even">
+<td style="text-align: left;">Count x</td>
+<td style="text-align: left;">0.500</td>
+<td style="text-align: left;">0.502</td>
+<td style="text-align: left;">0.002</td>
+<td style="text-align: left;">0.057</td>
+<td style="text-align: left;">0.054</td>
+<td style="text-align: left;">0.945</td>
+</tr>
+<tr class="odd">
+<td style="text-align: left;">Zero intercept</td>
+<td style="text-align: left;">-1.000</td>
+<td style="text-align: left;">-1.025</td>
+<td style="text-align: left;">-0.025</td>
+<td style="text-align: left;">0.235</td>
+<td style="text-align: left;">0.221</td>
+<td style="text-align: left;">0.960</td>
+</tr>
+<tr class="even">
+<td style="text-align: left;">Zero z</td>
+<td style="text-align: left;">0.800</td>
+<td style="text-align: left;">0.831</td>
+<td style="text-align: left;">0.031</td>
+<td style="text-align: left;">0.198</td>
+<td style="text-align: left;">0.182</td>
+<td style="text-align: left;">0.940</td>
+</tr>
+<tr class="odd">
+<td style="text-align: left;">Log theta</td>
+<td style="text-align: left;">0.693</td>
+<td style="text-align: left;">0.728</td>
+<td style="text-align: left;">0.034</td>
+<td style="text-align: left;">0.214</td>
+<td style="text-align: left;">0.214</td>
+<td style="text-align: left;">0.945</td>
+</tr>
+</tbody>
+</table>
+</div>
+</div>
+</figure>
+</div>
+</div>
+<p>All 200 of the 200 fits converged. Biases are small relative to their Monte Carlo standard errors (the largest absolute bias is 0.034), and the mean estimated standard errors are close to the Monte Carlo standard deviations, though slightly smaller for some parameters, as is typical of Wald standard errors at moderate sample sizes. Coverage ranges from 0.915 to 0.960. With 200 replicates the Monte Carlo error of a coverage proportion is about 0.015, so the lowest value is within sampling error of the nominal level, although it hints that the intervals for the count intercept are a little liberal.</p>
+</section>
+<section id="data-analysis-physician-office-visits-in-nmes1988" class="level1" data-number="6">
+<h1 data-number="6"><span class="header-section-number">6</span> Data analysis: physician office visits in NMES1988</h1>
+<section id="data-and-models" class="level2" data-number="6.1">
+<h2 data-number="6.1"><span class="header-section-number">6.1</span> Data and models</h2>
+<p>The <code>NMES1988</code> data contain the number of physician office visits (<code>visits</code>) for 4,406 individuals aged 66 and over in the 1987–88 US National Medical Expenditure Survey (Deb and Trivedi, 1997; Zeileis, Kleiber and Jackman, 2008). The covariates are the number of hospital stays (<code>hospital</code>), self-perceived health (<code>health</code>: poor, average, excellent; average is the reference), the number of chronic conditions (<code>chronic</code>), <code>gender</code>, years of education (<code>school</code>), and private insurance (<code>insurance</code>). A Poisson model (fitted with <code>glm()</code> for reference), an NB model, and a ZINB model were fitted. All three use <code>hospital</code>, <code>health</code>, <code>chronic</code>, <code>gender</code>, <code>school</code>, and <code>insurance</code> in the count part; the ZINB zero part uses <code>hospital</code>, <code>chronic</code>, <code>gender</code>, <code>school</code>, and <code>insurance</code>, the minimum set suggested in the project instructions (<code>health</code> was left out of the zero part to keep it to the suggested set).</p>
+</section>
+<section id="overdispersion-and-excess-zeros" class="level2" data-number="6.2">
+<h2 data-number="6.2"><span class="header-section-number">6.2</span> Overdispersion and excess zeros</h2>
+<p>The mean number of visits is 5.77 while the variance is 45.69, a variance-to-mean ratio of 7.9. After adjusting for the covariates the overdispersion remains: the Pearson chi-square statistic divided by the residual degrees of freedom from the Poisson model is 6.71, far above the value of one expected under a correct Poisson model. Zeros are also more common than the Poisson model predicts: 683 of the 4406 individuals (15.5%) had no visits, whereas the Poisson model expects only 47. <a href="#fig-freq" class="quarto-xref">Figure&nbsp;1</a> compares the observed frequencies of small counts with those expected from the three models.</p>
+<div class="cell">
+<div class="cell-output-display">
+<div id="fig-freq" class="quarto-float quarto-figure quarto-figure-center">
+<figure class="quarto-float quarto-float-fig">
+<div aria-describedby="fig-freq-caption-0ceaefa1-69ba-4598-a22c-09a6ac19f8ca">
+<img src="report_files/figure-html/fig-freq-1.png" width="624">
+</div>
+<figcaption class="quarto-float-caption-bottom quarto-float-caption quarto-float-fig" id="fig-freq-caption-0ceaefa1-69ba-4598-a22c-09a6ac19f8ca">
+Figure&nbsp;1: Observed and expected frequencies of physician visits (0 to 15) under the Poisson, NB, and ZINB models.
+</figcaption>
+</figure>
+</div>
+</div>
+</div>
+</section>
+<section id="model-comparison" class="level2" data-number="6.3">
+<h2 data-number="6.3"><span class="header-section-number">6.3</span> Model comparison</h2>
+<div class="cell">
+<div id="tbl-ic" class="cell quarto-float quarto-figure quarto-figure-center">
+<figure class="quarto-float quarto-float-tbl">
+<figcaption class="quarto-float-caption-top quarto-float-caption quarto-float-tbl" id="tbl-ic-caption-0ceaefa1-69ba-4598-a22c-09a6ac19f8ca">
+Table&nbsp;5: Model comparison for NMES1988: log-likelihood, AIC, BIC, and expected number of zeros (observed: 683).
+</figcaption>
+<div aria-describedby="tbl-ic-caption-0ceaefa1-69ba-4598-a22c-09a6ac19f8ca">
+<div class="cell-output-display">
+<table class="cell caption-top">
+<thead>
+<tr class="header">
+<th style="text-align: left;">Model</th>
+<th style="text-align: right;">Parameters</th>
+<th style="text-align: left;">Log-lik.</th>
+<th style="text-align: left;">AIC</th>
+<th style="text-align: left;">BIC</th>
+<th style="text-align: left;">Expected zeros</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td style="text-align: left;">Poisson</td>
+<td style="text-align: right;">8</td>
+<td style="text-align: left;">-17971.6</td>
+<td style="text-align: left;">35959.2</td>
+<td style="text-align: left;">36010.4</td>
+<td style="text-align: left;">46.7</td>
+</tr>
+<tr class="even">
+<td style="text-align: left;">NB</td>
+<td style="text-align: right;">9</td>
+<td style="text-align: left;">-12170.6</td>
+<td style="text-align: left;">24359.1</td>
+<td style="text-align: left;">24416.6</td>
+<td style="text-align: left;">608.0</td>
+</tr>
+<tr class="odd">
+<td style="text-align: left;">ZINB</td>
+<td style="text-align: right;">15</td>
+<td style="text-align: left;">-12090.7</td>
+<td style="text-align: left;">24211.4</td>
+<td style="text-align: left;">24307.3</td>
+<td style="text-align: left;">708.9</td>
+</tr>
+</tbody>
+</table>
+</div>
+</div>
+</figure>
+</div>
+</div>
+<p><a href="#tbl-ic" class="quarto-xref">Table&nbsp;5</a> shows that the NB model improves on the Poisson model by thousands of log-likelihood units, confirming the overdispersion. The ZINB model improves on the NB model by a further 79.8 log-likelihood units for six additional parameters; AIC falls by 147.7 and BIC by 109.3, so both criteria favor ZINB. The NB model underpredicts the number of zeros (608 expected against 683 observed), and the ZINB model slightly overpredicts it (709), but is much closer to the observed value in relative terms (an error of 26 zeros against 75 for NB).</p>
+</section>
+<section id="estimates-and-interpretation" class="level2" data-number="6.4">
+<h2 data-number="6.4"><span class="header-section-number">6.4</span> Estimates and interpretation</h2>
+<p><a href="#tbl-irr" class="quarto-xref">Table&nbsp;6</a> reports incidence rate ratios (IRRs, <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><msup><mi>e</mi><mover><mi>β</mi><mo accent="true">̂</mo></mover></msup><annotation encoding="application/x-tex">e^{\hat\beta}</annotation></semantics></math>) from the NB model and from the count part of the ZINB model, and <a href="#tbl-orr" class="quarto-xref">Table&nbsp;7</a> reports odds ratios (ORs, <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><msup><mi>e</mi><mover><mi>γ</mi><mo accent="true">̂</mo></mover></msup><annotation encoding="application/x-tex">e^{\hat\gamma}</annotation></semantics></math>) for the zero part of the ZINB model, all with 95% Wald confidence intervals.</p>
+<div class="cell">
+<div id="tbl-irr" class="cell quarto-float quarto-figure quarto-figure-center">
+<figure class="quarto-float quarto-float-tbl">
+<figcaption class="quarto-float-caption-top quarto-float-caption quarto-float-tbl" id="tbl-irr-caption-0ceaefa1-69ba-4598-a22c-09a6ac19f8ca">
+Table&nbsp;6: Incidence rate ratios (95% Wald CI) for the NB model and the count part of the ZINB model.
+</figcaption>
+<div aria-describedby="tbl-irr-caption-0ceaefa1-69ba-4598-a22c-09a6ac19f8ca">
+<div class="cell-output-display">
+<table class="cell caption-top">
+<colgroup>
+<col style="width: 45%">
+<col style="width: 23%">
+<col style="width: 31%">
+</colgroup>
+<thead>
+<tr class="header">
+<th style="text-align: left;">Covariate</th>
+<th style="text-align: left;">NB IRR (95% CI)</th>
+<th style="text-align: left;">ZINB count IRR (95% CI)</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td style="text-align: left;">Intercept</td>
+<td style="text-align: left;">2.53 (2.28, 2.82)</td>
+<td style="text-align: left;">3.30 (2.95, 3.69)</td>
+</tr>
+<tr class="even">
+<td style="text-align: left;">Hospital stays (per stay)</td>
+<td style="text-align: left;">1.24 (1.20, 1.29)</td>
+<td style="text-align: left;">1.22 (1.18, 1.27)</td>
+</tr>
+<tr class="odd">
+<td style="text-align: left;">Health: poor vs.&nbsp;average</td>
+<td style="text-align: left;">1.36 (1.23, 1.49)</td>
+<td style="text-align: left;">1.33 (1.22, 1.45)</td>
+</tr>
+<tr class="even">
+<td style="text-align: left;">Health: excellent vs.&nbsp;average</td>
+<td style="text-align: left;">0.71 (0.63, 0.80)</td>
+<td style="text-align: left;">0.73 (0.65, 0.82)</td>
+</tr>
+<tr class="odd">
+<td style="text-align: left;">Chronic conditions (per condition)</td>
+<td style="text-align: left;">1.19 (1.16, 1.22)</td>
+<td style="text-align: left;">1.14 (1.11, 1.16)</td>
+</tr>
+<tr class="even">
+<td style="text-align: left;">Male vs.&nbsp;female</td>
+<td style="text-align: left;">0.88 (0.83, 0.94)</td>
+<td style="text-align: left;">0.92 (0.87, 0.98)</td>
+</tr>
+<tr class="odd">
+<td style="text-align: left;">Education (per year)</td>
+<td style="text-align: left;">1.03 (1.02, 1.04)</td>
+<td style="text-align: left;">1.02 (1.01, 1.03)</td>
+</tr>
+<tr class="even">
+<td style="text-align: left;">Private insurance: yes vs.&nbsp;no</td>
+<td style="text-align: left;">1.25 (1.16, 1.35)</td>
+<td style="text-align: left;">1.13 (1.05, 1.23)</td>
+</tr>
+</tbody>
+</table>
+</div>
+</div>
+</figure>
+</div>
+</div>
+<div class="cell">
+<div id="tbl-orr" class="cell quarto-float quarto-figure quarto-figure-center">
+<figure class="quarto-float quarto-float-tbl">
+<figcaption class="quarto-float-caption-top quarto-float-caption quarto-float-tbl" id="tbl-orr-caption-0ceaefa1-69ba-4598-a22c-09a6ac19f8ca">
+Table&nbsp;7: Odds ratios (95% Wald CI) of being a structural zero, ZINB zero part.
+</figcaption>
+<div aria-describedby="tbl-orr-caption-0ceaefa1-69ba-4598-a22c-09a6ac19f8ca">
+<div class="cell-output-display">
+<table class="cell caption-top">
+<thead>
+<tr class="header">
+<th style="text-align: left;">Covariate</th>
+<th style="text-align: left;">OR (95% CI)</th>
+<th style="text-align: left;">p-value</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td style="text-align: left;">Intercept</td>
+<td style="text-align: left;">0.95 (0.56, 1.62)</td>
+<td style="text-align: left;">0.8614</td>
+</tr>
+<tr class="even">
+<td style="text-align: left;">Hospital stays (per stay)</td>
+<td style="text-align: left;">0.45 (0.20, 1.02)</td>
+<td style="text-align: left;">0.0571</td>
+</tr>
+<tr class="odd">
+<td style="text-align: left;">Chronic conditions (per condition)</td>
+<td style="text-align: left;">0.29 (0.20, 0.41)</td>
+<td style="text-align: left;">&lt;0.0001</td>
+</tr>
+<tr class="even">
+<td style="text-align: left;">Male vs.&nbsp;female</td>
+<td style="text-align: left;">1.91 (1.29, 2.83)</td>
+<td style="text-align: left;">0.0012</td>
+</tr>
+<tr class="odd">
+<td style="text-align: left;">Education (per year)</td>
+<td style="text-align: left;">0.92 (0.87, 0.97)</td>
+<td style="text-align: left;">0.0014</td>
+</tr>
+<tr class="even">
+<td style="text-align: left;">Private insurance: yes vs.&nbsp;no</td>
+<td style="text-align: left;">0.31 (0.20, 0.48)</td>
+<td style="text-align: left;">&lt;0.0001</td>
+</tr>
+</tbody>
+</table>
+</div>
+</div>
+</figure>
+</div>
+</div>
+<p><strong>Count part (NB and ZINB).</strong> The two models agree qualitatively. Holding the other covariates fixed, each additional chronic condition is associated with 19% more expected visits in the NB model (IRR 1.19) and 14% more in the count part of the ZINB model (IRR 1.14). Each additional hospital stay is associated with about 22% more visits (ZINB IRR 1.22). People in poor health are expected to make 33% more visits than people in average health (IRR 1.33), and people in excellent health 27% fewer (IRR 0.73). Private insurance is associated with 13% more visits (IRR 1.13), and each year of education with about 2% more. Men are expected to make 8% fewer visits than women in the ZINB count part (IRR 0.92), a smaller difference than in the NB model (IRR 0.88). The IRRs of the ZINB count part are generally closer to one than those of the NB model for chronic conditions, gender, and insurance, because part of what the NB model attributes to those covariates is absorbed by the zero part.</p>
+<p><strong>Zero part (ZINB).</strong> The zero part describes the odds of belonging to the group that has no visits regardless of circumstances. Each additional chronic condition multiplies the odds of being a structural zero by 0.29, a reduction of 71%. Private insurance multiplies the odds by 0.31 (69% lower), and each year of education by 0.92. Men have 1.91 times the odds of women of being structural zeros (91% higher). The effect of hospital stays is borderline (OR 0.45, <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mi>p</mi><mo>=</mo></mrow><annotation encoding="application/x-tex">p =</annotation></semantics></math> 0.0571). In short, healthier, uninsured, less educated men are the most likely to be non-users of physician office care, and among users, sicker people visit more often. Because these odds ratios come from a latent class, they should be read as statements about a modeled non-user group, not as directly observed behavior.</p>
+</section>
+<section id="which-model-do-we-prefer" class="level2" data-number="6.5">
+<h2 data-number="6.5"><span class="header-section-number">6.5</span> Which model do we prefer?</h2>
+<p>The ZINB model is the better description of these data. It has much lower AIC and BIC than the NB model, it reproduces the number of zeros much better, and its zero-part effects (chronic conditions, insurance, gender, education) are strong and plausible rather than weakly identified. The estimated dispersion parameter also rises from <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mover><mi>θ</mi><mo accent="true">̂</mo></mover><mo>=</mo></mrow><annotation encoding="application/x-tex">\hat\theta =</annotation></semantics></math> 1.21 to 1.48 (larger <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mi>θ</mi><annotation encoding="application/x-tex">\theta</annotation></semantics></math> means less overdispersion), which means that some of the apparent overdispersion in the NB fit was really excess zeros. The cost is complexity: the model has six more parameters and its structural-zero interpretation is a modeling device that the data alone cannot confirm. The slight overprediction of zeros by the ZINB model and the large remaining dispersion (<math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mover><mi>θ</mi><mo accent="true">̂</mo></mover><annotation encoding="application/x-tex">\hat\theta</annotation></semantics></math> is still small) suggest that a hurdle model or a model with additional covariates in the zero part could be explored, but within the NB family the ZINB model is clearly preferred here.</p>
+</section>
+</section>
+<section id="discussion" class="level1" data-number="7">
+<h1 data-number="7"><span class="header-section-number">7</span> Discussion</h1>
+<p>The package reproduces <code>glm.nb()</code> and <code>zeroinfl()</code> to well within the required tolerances using only IRLS, Newton–Raphson, and EM, and the simulation shows that it recovers known parameters. Several limitations are worth noting. EM converges linearly, so ZINB fits take more iterations and more time than the quasi-Newton optimizer used by <code>zeroinfl()</code>, particularly when the zero part is weakly identified. When the data support no zero inflation, the maximum likelihood estimate lies on the boundary <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mi>π</mi><mo>→</mo><mn>0</mn></mrow><annotation encoding="application/x-tex">\pi \to 0</annotation></semantics></math>; the zero-part intercept then diverges to <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mi>−</mi><mi>∞</mi></mrow><annotation encoding="application/x-tex">-\infty</annotation></semantics></math> and its standard error is meaningless, as happens for <code>art ~ ment | 1</code> on bioChemists, where the package and <code>zeroinfl()</code> agree on everything except the arbitrary value reached by that intercept. The likelihood of a mixture can have several local maxima, and the package uses a single starting strategy. Standard errors are Wald-type and treat the model as correctly specified, and the NB standard errors treat <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mi>θ</mi><annotation encoding="application/x-tex">\theta</annotation></semantics></math> as known. The package supports offsets only in the count part, has no user-facing prior weights, and uses only the log link for the count model and the logit link for the zero model. Natural extensions are zero-inflated Poisson and hurdle models, likelihood-ratio or Vuong tests for the zero part, profile-likelihood or bootstrap intervals, observation weights, and a compiled implementation of the inner loops.</p>
+</section>
+<section id="ai-use-statement" class="level1" data-number="8">
+<h1 data-number="8"><span class="header-section-number">8</span> AI-use statement</h1>
+<p>I used Claude (Anthropic) as a programming and writing assistant for this project. I asked it to implement <code>nbreg()</code> and <code>zinbreg()</code> according to the equations in Sections 2.1–3.2 of the project description (with the rule that <code>optim()</code>, <code>glm()</code> and the other functions in Table 2 are prohibited, recorded in <code>CLAUDE.md</code>), to write the S3 methods, roxygen documentation, testthat tests, benchmark and simulation scripts, and to draft this report and the CI workflow. I also asked Claude to explain the algorithms in detail (the IRLS weights and working response, the Newton–Raphson update for <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mrow><mi mathvariant="normal">log</mi><mo>⁡</mo></mrow><mi>θ</mi></mrow><annotation encoding="application/x-tex">\log\theta</annotation></semantics></math>, the EM E- and M-steps, and the fractional-response logistic regression), and I used these explanations to prepare for the oral walkthrough. Claude additionally derived the analytic Hessian used for the ZINB standard errors.</p>
+</section>
+<section id="references" class="level1 unnumbered">
+<h1 class="unnumbered">References</h1>
+<ul>
+<li>Cameron, A. C. and Trivedi, P. K. (2013). <em>Regression Analysis of Count Data</em> (2nd ed.). Cambridge University Press.</li>
+<li>Deb, P. and Trivedi, P. K. (1997). Demand for medical care by the elderly: A finite mixture approach. <em>Journal of Applied Econometrics</em>, 12(3), 313–336.</li>
+<li>Dempster, A. P., Laird, N. M. and Rubin, D. B. (1977). Maximum likelihood from incomplete data via the EM algorithm. <em>Journal of the Royal Statistical Society B</em>, 39(1), 1–38.</li>
+<li>Lambert, D. (1992). Zero-inflated Poisson regression, with an application to defects in manufacturing. <em>Technometrics</em>, 34(1), 1–14.</li>
+<li>Long, J. S. (1997). <em>Regression Models for Categorical and Limited Dependent Variables</em>. Sage.</li>
+<li>McCullagh, P. and Nelder, J. A. (1989). <em>Generalized Linear Models</em> (2nd ed.). Chapman &amp; Hall.</li>
+<li>Venables, W. N. and Ripley, B. D. (2002). <em>Modern Applied Statistics with S</em> (4th ed.). Springer.</li>
+<li>Wickham, H. and Bryan, J. (2023). <em>R Packages</em> (2nd ed.). O’Reilly. <a href="https://r-pkgs.org" class="uri">https://r-pkgs.org</a></li>
+<li>Zeileis, A., Kleiber, C. and Jackman, S. (2008). Regression models for count data in R. <em>Journal of Statistical Software</em>, 27(8), 1–25.</li>
+</ul>
+<div style="page-break-after: always;"></div>
+</section>
+<section id="appendix-a-side-by-side-estimates" class="level1 unnumbered">
+<h1 class="unnumbered">Appendix A: Side-by-side estimates</h1>
+<p>For each data set and model, the estimates and standard errors from <code>zinbTruitt</code> and from the reference function, with absolute differences. For NB the last row is <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mi>θ</mi><annotation encoding="application/x-tex">\theta</annotation></semantics></math>; for ZINB it is <math display="inline" xmlns="http://www.w3.org/1998/Math/MathML"><semantics><mrow><mrow><mi mathvariant="normal">log</mi><mo>⁡</mo></mrow><mi>θ</mi></mrow><annotation encoding="application/x-tex">\log\theta</annotation></semantics></math>.</p>
+<table class="caption-top">
+<caption>bioChemists NB</caption>
+<colgroup>
+<col style="width: 16%">
+<col style="width: 12%">
+<col style="width: 13%">
+<col style="width: 15%">
+<col style="width: 11%">
+<col style="width: 11%">
+<col style="width: 19%">
+</colgroup>
+<thead>
+<tr class="header">
+<th style="text-align: left;">Term</th>
+<th style="text-align: left;">Ours</th>
+<th style="text-align: left;">Reference</th>
+<th style="text-align: left;">Abs. diff.</th>
+<th style="text-align: left;">SE ours</th>
+<th style="text-align: left;">SE ref.</th>
+<th style="text-align: left;">SE abs. diff.</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td style="text-align: left;">(Intercept)</td>
+<td style="text-align: left;">0.25614</td>
+<td style="text-align: left;">0.25614</td>
+<td style="text-align: left;">7.8e-09</td>
+<td style="text-align: left;">0.13735</td>
+<td style="text-align: left;">0.13735</td>
+<td style="text-align: left;">8.2e-11</td>
+</tr>
+<tr class="even">
+<td style="text-align: left;">femWomen</td>
+<td style="text-align: left;">-0.21642</td>
+<td style="text-align: left;">-0.21642</td>
+<td style="text-align: left;">1.6e-09</td>
+<td style="text-align: left;">0.07264</td>
+<td style="text-align: left;">0.07264</td>
+<td style="text-align: left;">2.7e-11</td>
+</tr>
+<tr class="odd">
+<td style="text-align: left;">marMarried</td>
+<td style="text-align: left;">0.15049</td>
+<td style="text-align: left;">0.15049</td>
+<td style="text-align: left;">1.0e-09</td>
+<td style="text-align: left;">0.08210</td>
+<td style="text-align: left;">0.08210</td>
+<td style="text-align: left;">4.1e-11</td>
+</tr>
+<tr class="even">
+<td style="text-align: left;">kid5</td>
+<td style="text-align: left;">-0.17642</td>
+<td style="text-align: left;">-0.17642</td>
+<td style="text-align: left;">1.8e-09</td>
+<td style="text-align: left;">0.05281</td>
+<td style="text-align: left;">0.05281</td>
+<td style="text-align: left;">6.5e-12</td>
+</tr>
+<tr class="odd">
+<td style="text-align: left;">phd</td>
+<td style="text-align: left;">0.01527</td>
+<td style="text-align: left;">0.01527</td>
+<td style="text-align: left;">1.9e-10</td>
+<td style="text-align: left;">0.03587</td>
+<td style="text-align: left;">0.03587</td>
+<td style="text-align: left;">1.4e-11</td>
+</tr>
+<tr class="even">
+<td style="text-align: left;">ment</td>
+<td style="text-align: left;">0.02908</td>
+<td style="text-align: left;">0.02908</td>
+<td style="text-align: left;">6.8e-10</td>
+<td style="text-align: left;">0.00321</td>
+<td style="text-align: left;">0.00321</td>
+<td style="text-align: left;">6.1e-12</td>
+</tr>
+<tr class="odd">
+<td style="text-align: left;">theta</td>
+<td style="text-align: left;">2.26439</td>
+<td style="text-align: left;">2.26439</td>
+<td style="text-align: left;">3.0e-09</td>
+<td style="text-align: left;">0.27118</td>
+<td style="text-align: left;">0.27118</td>
+<td style="text-align: left;">1.1e-06</td>
+</tr>
+</tbody>
+</table>
+<table class="caption-top">
+<caption>bioChemists ZINB</caption>
+<colgroup>
+<col style="width: 23%">
+<col style="width: 11%">
+<col style="width: 12%">
+<col style="width: 14%">
+<col style="width: 10%">
+<col style="width: 10%">
+<col style="width: 17%">
+</colgroup>
+<thead>
+<tr class="header">
+<th style="text-align: left;">Term</th>
+<th style="text-align: left;">Ours</th>
+<th style="text-align: left;">Reference</th>
+<th style="text-align: left;">Abs. diff.</th>
+<th style="text-align: left;">SE ours</th>
+<th style="text-align: left;">SE ref.</th>
+<th style="text-align: left;">SE abs. diff.</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td style="text-align: left;">count_(Intercept)</td>
+<td style="text-align: left;">0.41675</td>
+<td style="text-align: left;">0.41675</td>
+<td style="text-align: left;">9.3e-07</td>
+<td style="text-align: left;">0.14360</td>
+<td style="text-align: left;">0.14360</td>
+<td style="text-align: left;">3.3e-07</td>
+</tr>
+<tr class="even">
+<td style="text-align: left;">count_femWomen</td>
+<td style="text-align: left;">-0.19551</td>
+<td style="text-align: left;">-0.19551</td>
+<td style="text-align: left;">8.7e-07</td>
+<td style="text-align: left;">0.07559</td>
+<td style="text-align: left;">0.07559</td>
+<td style="text-align: left;">4.8e-08</td>
+</tr>
+<tr class="odd">
+<td style="text-align: left;">count_marMarried</td>
+<td style="text-align: left;">0.09758</td>
+<td style="text-align: left;">0.09758</td>
+<td style="text-align: left;">5.1e-07</td>
+<td style="text-align: left;">0.08445</td>
+<td style="text-align: left;">0.08445</td>
+<td style="text-align: left;">9.7e-09</td>
+</tr>
+<tr class="even">
+<td style="text-align: left;">count_kid5</td>
+<td style="text-align: left;">-0.15173</td>
+<td style="text-align: left;">-0.15173</td>
+<td style="text-align: left;">6.4e-07</td>
+<td style="text-align: left;">0.05421</td>
+<td style="text-align: left;">0.05421</td>
+<td style="text-align: left;">8.9e-10</td>
+</tr>
+<tr class="odd">
+<td style="text-align: left;">count_phd</td>
+<td style="text-align: left;">-0.00070</td>
+<td style="text-align: left;">-0.00070</td>
+<td style="text-align: left;">2.4e-07</td>
+<td style="text-align: left;">0.03627</td>
+<td style="text-align: left;">0.03627</td>
+<td style="text-align: left;">7.8e-08</td>
+</tr>
+<tr class="even">
+<td style="text-align: left;">count_ment</td>
+<td style="text-align: left;">0.02479</td>
+<td style="text-align: left;">0.02479</td>
+<td style="text-align: left;">1.2e-07</td>
+<td style="text-align: left;">0.00349</td>
+<td style="text-align: left;">0.00349</td>
+<td style="text-align: left;">2.5e-07</td>
+</tr>
+<tr class="odd">
+<td style="text-align: left;">zero_(Intercept)</td>
+<td style="text-align: left;">-0.19174</td>
+<td style="text-align: left;">-0.19169</td>
+<td style="text-align: left;">5.6e-05</td>
+<td style="text-align: left;">1.32278</td>
+<td style="text-align: left;">1.32282</td>
+<td style="text-align: left;">3.5e-05</td>
+</tr>
+<tr class="even">
+<td style="text-align: left;">zero_femWomen</td>
+<td style="text-align: left;">0.63594</td>
+<td style="text-align: left;">0.63593</td>
+<td style="text-align: left;">4.4e-06</td>
+<td style="text-align: left;">0.84889</td>
+<td style="text-align: left;">0.84892</td>
+<td style="text-align: left;">2.5e-05</td>
+</tr>
+<tr class="odd">
+<td style="text-align: left;">zero_marMarried</td>
+<td style="text-align: left;">-1.49941</td>
+<td style="text-align: left;">-1.49947</td>
+<td style="text-align: left;">5.8e-05</td>
+<td style="text-align: left;">0.93864</td>
+<td style="text-align: left;">0.93867</td>
+<td style="text-align: left;">3.2e-05</td>
+</tr>
+<tr class="even">
+<td style="text-align: left;">zero_kid5</td>
+<td style="text-align: left;">0.62842</td>
+<td style="text-align: left;">0.62843</td>
+<td style="text-align: left;">8.0e-06</td>
+<td style="text-align: left;">0.44277</td>
+<td style="text-align: left;">0.44278</td>
+<td style="text-align: left;">9.4e-06</td>
+</tr>
+<tr class="odd">
+<td style="text-align: left;">zero_phd</td>
+<td style="text-align: left;">-0.03770</td>
+<td style="text-align: left;">-0.03771</td>
+<td style="text-align: left;">1.2e-05</td>
+<td style="text-align: left;">0.30800</td>
+<td style="text-align: left;">0.30801</td>
+<td style="text-align: left;">7.9e-06</td>
+</tr>
+<tr class="even">
+<td style="text-align: left;">zero_ment</td>
+<td style="text-align: left;">-0.88226</td>
+<td style="text-align: left;">-0.88229</td>
+<td style="text-align: left;">2.9e-05</td>
+<td style="text-align: left;">0.31621</td>
+<td style="text-align: left;">0.31623</td>
+<td style="text-align: left;">1.4e-05</td>
+</tr>
+<tr class="odd">
+<td style="text-align: left;">Log(theta)</td>
+<td style="text-align: left;">0.97636</td>
+<td style="text-align: left;">0.97636</td>
+<td style="text-align: left;">4.9e-06</td>
+<td style="text-align: left;">0.13547</td>
+<td style="text-align: left;">0.13547</td>
+<td style="text-align: left;">1.1e-06</td>
+</tr>
+</tbody>
+</table>
+<table class="caption-top">
+<caption>NMES1988 NB</caption>
+<colgroup>
+<col style="width: 21%">
+<col style="width: 11%">
+<col style="width: 13%">
+<col style="width: 14%">
+<col style="width: 10%">
+<col style="width: 10%">
+<col style="width: 18%">
+</colgroup>
+<thead>
+<tr class="header">
+<th style="text-align: left;">Term</th>
+<th style="text-align: left;">Ours</th>
+<th style="text-align: left;">Reference</th>
+<th style="text-align: left;">Abs. diff.</th>
+<th style="text-align: left;">SE ours</th>
+<th style="text-align: left;">SE ref.</th>
+<th style="text-align: left;">SE abs. diff.</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td style="text-align: left;">(Intercept)</td>
+<td style="text-align: left;">0.92926</td>
+<td style="text-align: left;">0.92926</td>
+<td style="text-align: left;">6.2e-08</td>
+<td style="text-align: left;">0.05459</td>
+<td style="text-align: left;">0.05459</td>
+<td style="text-align: left;">1.5e-10</td>
+</tr>
+<tr class="even">
+<td style="text-align: left;">hospital</td>
+<td style="text-align: left;">0.21777</td>
+<td style="text-align: left;">0.21777</td>
+<td style="text-align: left;">3.5e-08</td>
+<td style="text-align: left;">0.02018</td>
+<td style="text-align: left;">0.02018</td>
+<td style="text-align: left;">6.5e-11</td>
+</tr>
+<tr class="odd">
+<td style="text-align: left;">healthpoor</td>
+<td style="text-align: left;">0.30501</td>
+<td style="text-align: left;">0.30501</td>
+<td style="text-align: left;">3.7e-08</td>
+<td style="text-align: left;">0.04851</td>
+<td style="text-align: left;">0.04851</td>
+<td style="text-align: left;">8.6e-11</td>
+</tr>
+<tr class="even">
+<td style="text-align: left;">healthexcellent</td>
+<td style="text-align: left;">-0.34181</td>
+<td style="text-align: left;">-0.34181</td>
+<td style="text-align: left;">9.4e-09</td>
+<td style="text-align: left;">0.06092</td>
+<td style="text-align: left;">0.06092</td>
+<td style="text-align: left;">1.7e-10</td>
+</tr>
+<tr class="odd">
+<td style="text-align: left;">chronic</td>
+<td style="text-align: left;">0.17492</td>
+<td style="text-align: left;">0.17492</td>
+<td style="text-align: left;">1.7e-08</td>
+<td style="text-align: left;">0.01209</td>
+<td style="text-align: left;">0.01209</td>
+<td style="text-align: left;">1.3e-12</td>
+</tr>
+<tr class="even">
+<td style="text-align: left;">gendermale</td>
+<td style="text-align: left;">-0.12649</td>
+<td style="text-align: left;">-0.12649</td>
+<td style="text-align: left;">5.3e-09</td>
+<td style="text-align: left;">0.03122</td>
+<td style="text-align: left;">0.03122</td>
+<td style="text-align: left;">4.5e-11</td>
+</tr>
+<tr class="odd">
+<td style="text-align: left;">school</td>
+<td style="text-align: left;">0.02682</td>
+<td style="text-align: left;">0.02682</td>
+<td style="text-align: left;">9.6e-10</td>
+<td style="text-align: left;">0.00439</td>
+<td style="text-align: left;">0.00439</td>
+<td style="text-align: left;">7.1e-12</td>
+</tr>
+<tr class="even">
+<td style="text-align: left;">insuranceyes</td>
+<td style="text-align: left;">0.22440</td>
+<td style="text-align: left;">0.22440</td>
+<td style="text-align: left;">1.5e-08</td>
+<td style="text-align: left;">0.03946</td>
+<td style="text-align: left;">0.03946</td>
+<td style="text-align: left;">8.2e-11</td>
+</tr>
+<tr class="odd">
+<td style="text-align: left;">theta</td>
+<td style="text-align: left;">1.20660</td>
+<td style="text-align: left;">1.20660</td>
+<td style="text-align: left;">1.3e-09</td>
+<td style="text-align: left;">0.03356</td>
+<td style="text-align: left;">0.03355</td>
+<td style="text-align: left;">4.2e-07</td>
+</tr>
+</tbody>
+</table>
+<table class="caption-top">
+<caption>NMES1988 ZINB</caption>
+<colgroup>
+<col style="width: 26%">
+<col style="width: 10%">
+<col style="width: 12%">
+<col style="width: 13%">
+<col style="width: 9%">
+<col style="width: 9%">
+<col style="width: 17%">
+</colgroup>
+<thead>
+<tr class="header">
+<th style="text-align: left;">Term</th>
+<th style="text-align: left;">Ours</th>
+<th style="text-align: left;">Reference</th>
+<th style="text-align: left;">Abs. diff.</th>
+<th style="text-align: left;">SE ours</th>
+<th style="text-align: left;">SE ref.</th>
+<th style="text-align: left;">SE abs. diff.</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td style="text-align: left;">count_(Intercept)</td>
+<td style="text-align: left;">1.19372</td>
+<td style="text-align: left;">1.19371</td>
+<td style="text-align: left;">3.8e-06</td>
+<td style="text-align: left;">0.05666</td>
+<td style="text-align: left;">0.05666</td>
+<td style="text-align: left;">4.1e-08</td>
+</tr>
+<tr class="even">
+<td style="text-align: left;">count_hospital</td>
+<td style="text-align: left;">0.20148</td>
+<td style="text-align: left;">0.20148</td>
+<td style="text-align: left;">2.8e-08</td>
+<td style="text-align: left;">0.02036</td>
+<td style="text-align: left;">0.02036</td>
+<td style="text-align: left;">1.7e-08</td>
+</tr>
+<tr class="odd">
+<td style="text-align: left;">count_healthpoor</td>
+<td style="text-align: left;">0.28513</td>
+<td style="text-align: left;">0.28513</td>
+<td style="text-align: left;">2.3e-08</td>
+<td style="text-align: left;">0.04509</td>
+<td style="text-align: left;">0.04509</td>
+<td style="text-align: left;">5.2e-08</td>
+</tr>
+<tr class="even">
+<td style="text-align: left;">count_healthexcellent</td>
+<td style="text-align: left;">-0.31934</td>
+<td style="text-align: left;">-0.31934</td>
+<td style="text-align: left;">3.8e-08</td>
+<td style="text-align: left;">0.06040</td>
+<td style="text-align: left;">0.06040</td>
+<td style="text-align: left;">5.1e-08</td>
+</tr>
+<tr class="odd">
+<td style="text-align: left;">count_chronic</td>
+<td style="text-align: left;">0.12900</td>
+<td style="text-align: left;">0.12900</td>
+<td style="text-align: left;">5.3e-07</td>
+<td style="text-align: left;">0.01193</td>
+<td style="text-align: left;">0.01193</td>
+<td style="text-align: left;">1.7e-08</td>
+</tr>
+<tr class="even">
+<td style="text-align: left;">count_gendermale</td>
+<td style="text-align: left;">-0.08028</td>
+<td style="text-align: left;">-0.08028</td>
+<td style="text-align: left;">7.0e-07</td>
+<td style="text-align: left;">0.03102</td>
+<td style="text-align: left;">0.03102</td>
+<td style="text-align: left;">4.9e-08</td>
+</tr>
+<tr class="odd">
+<td style="text-align: left;">count_school</td>
+<td style="text-align: left;">0.02142</td>
+<td style="text-align: left;">0.02142</td>
+<td style="text-align: left;">9.5e-09</td>
+<td style="text-align: left;">0.00436</td>
+<td style="text-align: left;">0.00436</td>
+<td style="text-align: left;">1.6e-08</td>
+</tr>
+<tr class="even">
+<td style="text-align: left;">count_insuranceyes</td>
+<td style="text-align: left;">0.12586</td>
+<td style="text-align: left;">0.12586</td>
+<td style="text-align: left;">1.9e-06</td>
+<td style="text-align: left;">0.04159</td>
+<td style="text-align: left;">0.04159</td>
+<td style="text-align: left;">6.5e-08</td>
+</tr>
+<tr class="odd">
+<td style="text-align: left;">zero_(Intercept)</td>
+<td style="text-align: left;">-0.04689</td>
+<td style="text-align: left;">-0.04688</td>
+<td style="text-align: left;">9.9e-06</td>
+<td style="text-align: left;">0.26856</td>
+<td style="text-align: left;">0.26856</td>
+<td style="text-align: left;">1.2e-07</td>
+</tr>
+<tr class="even">
+<td style="text-align: left;">zero_hospital</td>
+<td style="text-align: left;">-0.80045</td>
+<td style="text-align: left;">-0.80048</td>
+<td style="text-align: left;">3.3e-05</td>
+<td style="text-align: left;">0.42079</td>
+<td style="text-align: left;">0.42082</td>
+<td style="text-align: left;">2.2e-05</td>
+</tr>
+<tr class="odd">
+<td style="text-align: left;">zero_chronic</td>
+<td style="text-align: left;">-1.24791</td>
+<td style="text-align: left;">-1.24794</td>
+<td style="text-align: left;">3.1e-05</td>
+<td style="text-align: left;">0.17831</td>
+<td style="text-align: left;">0.17832</td>
+<td style="text-align: left;">7.3e-06</td>
+</tr>
+<tr class="even">
+<td style="text-align: left;">zero_gendermale</td>
+<td style="text-align: left;">0.64768</td>
+<td style="text-align: left;">0.64768</td>
+<td style="text-align: left;">3.0e-06</td>
+<td style="text-align: left;">0.20011</td>
+<td style="text-align: left;">0.20011</td>
+<td style="text-align: left;">3.6e-06</td>
+</tr>
+<tr class="odd">
+<td style="text-align: left;">zero_school</td>
+<td style="text-align: left;">-0.08377</td>
+<td style="text-align: left;">-0.08377</td>
+<td style="text-align: left;">1.5e-06</td>
+<td style="text-align: left;">0.02625</td>
+<td style="text-align: left;">0.02625</td>
+<td style="text-align: left;">3.6e-07</td>
+</tr>
+<tr class="even">
+<td style="text-align: left;">zero_insuranceyes</td>
+<td style="text-align: left;">-1.17561</td>
+<td style="text-align: left;">-1.17562</td>
+<td style="text-align: left;">4.8e-06</td>
+<td style="text-align: left;">0.22012</td>
+<td style="text-align: left;">0.22012</td>
+<td style="text-align: left;">5.1e-06</td>
+</tr>
+<tr class="odd">
+<td style="text-align: left;">Log(theta)</td>
+<td style="text-align: left;">0.39415</td>
+<td style="text-align: left;">0.39414</td>
+<td style="text-align: left;">5.2e-06</td>
+<td style="text-align: left;">0.03504</td>
+<td style="text-align: left;">0.03504</td>
+<td style="text-align: left;">2.8e-08</td>
+</tr>
+</tbody>
+</table>
+<div style="page-break-after: always;"></div>
+</section>
+<section id="appendix-b-session-information" class="level1 unnumbered">
+<h1 class="unnumbered">Appendix B: Session information</h1>
+<div class="cell">
+<div class="cell-output cell-output-stdout">
+<pre><code>R version 4.5.2 (2025-10-31 ucrt)
+Platform: x86_64-w64-mingw32/x64
+Running under: Windows 11 x64 (build 26200)
+
+Matrix products: default
+  LAPACK version 3.12.1
+
+locale:
+[1] LC_COLLATE=English_United States.utf8 
+[2] LC_CTYPE=English_United States.utf8   
+[3] LC_MONETARY=English_United States.utf8
+[4] LC_NUMERIC=C                          
+[5] LC_TIME=English_United States.utf8    
+
+time zone: America/New_York
+tzcode source: internal
+
+attached base packages:
+[1] stats     graphics  grDevices utils     datasets  methods   base     
+
+other attached packages:
+[1] knitr_1.50            pscl_1.5.9            MASS_7.3-65          
+[4] zinbTruitt_0.0.0.9000
+
+loaded via a namespace (and not attached):
+ [1] digest_0.6.39       Formula_1.2-5       numDeriv_2016.8-1.1
+ [4] fastmap_1.2.0       xfun_0.52           htmltools_0.5.8.1  
+ [7] rmarkdown_2.29      cli_3.6.5           compiler_4.5.2     
+[10] rstudioapi_0.18.0   tools_4.5.2         evaluate_1.0.4     
+[13] yaml_2.3.10         rlang_1.3.0         jsonlite_2.0.0     </code></pre>
+</div>
+</div>
+</section>
+</main>
+
+<div class="includes-after">
+<script id="quarto-html-after-body" type="application/javascript">
+  window.document.addEventListener("DOMContentLoaded", function (event) {
+      var localhostRegex = new RegExp(/^(?:http|https):\/\/localhost\:?[0-9]*\//);
+      var mailtoRegex = new RegExp(/^mailto:/);
+        var filterRegex = new RegExp('/' + window.location.host + '/');
+      var isInternal = (href) => {
+          return filterRegex.test(href) || localhostRegex.test(href) || mailtoRegex.test(href);
+      }
+      // Inspect non-navigation links and adorn them if external
+     var links = window.document.querySelectorAll('a[href]:not(.nav-link):not(.navbar-brand):not(.toc-action):not(.sidebar-link):not(.sidebar-item-toggle):not(.pagination-link):not(.no-external):not([aria-hidden]):not(.dropdown-item):not(.quarto-navigation-tool):not(.about-link)');
+      for (var i=0; i<links.length; i++) {
+        const link = links[i];
+        if (!isInternal(link.href)) {
+          // undo the damage that might have been done by quarto-nav.js in the case of
+          // links that we want to consider external
+          if (link.dataset.originalHref !== undefined) {
+            link.href = link.dataset.originalHref;
+          }
+        }
+      }
+    function tippyHover(el, contentFn, onTriggerFn, onUntriggerFn) {
+      const config = {
+        allowHTML: true,
+        maxWidth: 500,
+        delay: 100,
+        arrow: false,
+        appendTo: function(el) {
+            return el.parentElement;
+        },
+        interactive: true,
+        interactiveBorder: 10,
+        theme: 'light-border',
+        placement: 'bottom-start',
+      };
+      if (contentFn) {
+        config.content = contentFn;
+      }
+      if (onTriggerFn) {
+        config.onTrigger = onTriggerFn;
+      }
+      if (onUntriggerFn) {
+        config.onUntrigger = onUntriggerFn;
+      }
+      window.tippy(el, config); 
+    }
+    const findCites = (el) => {
+      const parentEl = el.parentElement;
+      if (parentEl) {
+        const cites = parentEl.dataset.cites;
+        if (cites) {
+          return {
+            el,
+            cites: cites.split(' ')
+          };
+        } else {
+          return findCites(el.parentElement)
+        }
+      } else {
+        return undefined;
+      }
+    };
+    var bibliorefs = window.document.querySelectorAll('a[role="doc-biblioref"]');
+    for (var i=0; i<bibliorefs.length; i++) {
+      const ref = bibliorefs[i];
+      const citeInfo = findCites(ref);
+      if (citeInfo) {
+        tippyHover(citeInfo.el, function() {
+          var popup = window.document.createElement('div');
+          citeInfo.cites.forEach(function(cite) {
+            var citeDiv = window.document.createElement('div');
+            citeDiv.classList.add('hanging-indent');
+            citeDiv.classList.add('csl-entry');
+            var biblioDiv = window.document.getElementById('ref-' + cite);
+            if (biblioDiv) {
+              citeDiv.innerHTML = biblioDiv.innerHTML;
+            }
+            popup.appendChild(citeDiv);
+          });
+          return popup.innerHTML;
+        });
+      }
+    }
+  });
+  </script>
+</div>
+
+
+
+</body></html>

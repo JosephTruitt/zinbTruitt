@@ -19,8 +19,3 @@ reference:
       - nbreg-methods
       - zinbreg-methods
 
-articles:
-  - title: Project report
-    navbar: ~
-    contents:
-      - report
